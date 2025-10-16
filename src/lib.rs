@@ -1,5 +1,5 @@
-pub mod server;
 pub mod config;
-pub mod handler;
-pub mod user;
-pub mod bridge;
+pub mod dispatch;
+pub mod manager;
+pub mod model;
+pub mod server;
