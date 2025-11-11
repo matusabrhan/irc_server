@@ -108,9 +108,36 @@ impl Dispatcher for Registered {
         Self: Sized,
     {
         match msg.command() {
+            Cmd::PING { token } => {
+                ctx.reply(
+                    Message::default()
+                        .with_source(Source::default().with_name(CONFIG.server.name.clone()))
+                        .with_command(Cmd::PONG {
+                            server: Some(CONFIG.server.name.clone()),
+                            token: token.to_string(),
+                        }),
+                )
+                .await
+            }
             Cmd::PRIVMSG { targets, .. } => {
                 for target in targets.split(',') {
                     ctx.send_to_user(target, msg.clone()).await?;
+                    ctx.send_to_channel(target, msg.clone()).await?;
+                }
+                Ok(())
+            }
+            Cmd::JOIN { channels, keys } => {
+                for channel in channels.split(',') {
+                    ctx.join_or_create(channel, None).await;
+                    ctx.reply(
+                        Message::default()
+                            .with_source(Source::default().with_name(ctx.get_nickname().await))
+                            .with_command(Cmd::JOIN {
+                                channels: channel.to_string(),
+                                keys: None,
+                            }),
+                    )
+                    .await?;
                 }
                 Ok(())
             }

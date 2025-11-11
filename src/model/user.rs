@@ -34,14 +34,14 @@ pub struct User {
 }
 
 impl User {
-    pub fn new(id: UserId) -> Self {
+    pub fn new(id: UserId, session_id: SessionId) -> Self {
         Self {
             id,
             nickname: String::new(),
             username: String::new(),
             realname: String::new(),
             registration: Registration::default(),
-            session_id: SessionId::INVALID,
+            session_id,
         }
     }
 

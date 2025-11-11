@@ -1,9 +1,13 @@
 use crate::{
+    config::CONFIG,
     dispatch::context::Context,
-    manager::{session::SessionManager, user::UserManager},
+    manager::{channel::ChannelManager, session::SessionManager, user::UserManager},
 };
-use irc_proto::{connection::Connection, message::Message};
-use log::{debug, info, warn};
+use irc_proto::{
+    connection::Connection,
+    message::{Command as Cmd, Message, Source},
+};
+use log::{debug, info};
 use std::{io, net::SocketAddr, time::Duration};
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -15,6 +19,7 @@ use tokio::{
 pub struct Server {
     session_manager: SessionManager,
     user_manager: UserManager,
+    channel_manager: ChannelManager,
     listener_handle: JoinHandle<io::Result<()>>,
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -24,6 +29,7 @@ impl Server {
         Self {
             session_manager: SessionManager::new(),
             user_manager: UserManager::new(),
+            channel_manager: ChannelManager::new(),
             listener_handle: tokio::spawn(async { Ok(()) }),
             shutdown_tx: broadcast::channel(1).0,
         }
@@ -33,6 +39,7 @@ impl Server {
         let mut server = Self::new();
         let session_mgr = server.session_manager.clone();
         let user_mgr = server.user_manager.clone();
+        let channel_mgr = server.channel_manager.clone();
         let mut shutdown = server.subscribe_shutdown();
 
         server.listener_handle = tokio::spawn(async move {
@@ -42,10 +49,10 @@ impl Server {
                     Ok((stream, addr)) = listener.accept() => {
                         debug!("connection from {:}", addr);
 
-                        let (write, read) = Server::spawn_rw_task(stream, shutdown.resubscribe());
+                        let (write, read) = Server::spawn_connection_task(stream, shutdown.resubscribe());
                         let session_id = session_mgr.create_session(write).await;
-                        let user_id = user_mgr.create_user().await;
-                        let ctx = Context::new(session_id, user_id, session_mgr.clone(), user_mgr.clone());
+                        let user_id = user_mgr.create_user(session_id).await;
+                        let ctx = Context::new(session_id, user_id, session_mgr.clone(), user_mgr.clone(), channel_mgr.clone());
                         let exit_sess_mgr = session_mgr.clone();
                         let exit_user_mgr = user_mgr.clone();
                         tokio::spawn(async move {
@@ -65,10 +72,10 @@ impl Server {
     }
 
     async fn run_session(mut read: mpsc::UnboundedReceiver<Message>, mut ctx: Context) {
-        let registered_ctx = loop {
+        let ctx = loop {
             match read.recv().await {
                 Some(msg) => {
-                    info!("msg: {:?}", msg);
+                    info!("user: {:?}", msg);
                     if ctx.handle(msg).await.is_err() {
                         return;
                     }
@@ -82,15 +89,20 @@ impl Server {
                 }
             }
         };
+
+        if ctx.welcome().await.is_err() {
+            return;
+        }
+
         while let Some(msg) = read.recv().await {
-            info!("msg: {:?}", msg);
-            if registered_ctx.handle(msg).await.is_err() {
-                break;
+            info!("{:?}: {:?}", ctx.get_nickname().await, msg);
+            if ctx.handle(msg).await.is_err() {
+                return;
             }
         }
     }
 
-    fn spawn_rw_task(
+    fn spawn_connection_task(
         stream: TcpStream,
         mut shutdown: broadcast::Receiver<()>,
     ) -> (
@@ -128,7 +140,6 @@ impl Server {
                 }
             }
             write_rx.close();
-            warn!("rw task exited");
         });
         (write_tx, read_rx)
     }

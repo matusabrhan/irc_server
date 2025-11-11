@@ -22,18 +22,24 @@ impl Into<usize> for ChannelId {
 
 #[derive(Debug, Clone)]
 pub struct Channel {
+    id: ChannelId,
     name: String,
     owner: UserId,
     members: Vec<UserId>,
 }
 
 impl Channel {
-    pub fn new(name: String, owner: UserId) -> Channel {
+    pub fn new(id: ChannelId, name: String, owner: UserId) -> Channel {
         Self {
+            id,
             name,
             owner,
             members: Vec::from([owner]),
         }
+    }
+
+    pub fn get_id(&self) -> ChannelId {
+        self.id
     }
 
     pub fn get_name(&self) -> &str {

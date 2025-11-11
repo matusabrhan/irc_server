@@ -1,4 +1,5 @@
+network_name = "network"
 [server]
 name = "server1"
 password = "password"
-address = "127.0.0.1:6697"
+address = "127.0.0.1:6667"

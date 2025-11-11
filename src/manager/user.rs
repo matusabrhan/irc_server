@@ -39,9 +39,12 @@ impl UserManager {
         UserId::from(self.next.fetch_add(1, Ordering::SeqCst))
     }
 
-    pub async fn create_user(&self) -> UserId {
+    pub async fn create_user(&self, session_id: SessionId) -> UserId {
         let id = self.allocate_id();
-        self.inner.write().await.insert(id, User::new(id));
+        self.inner
+            .write()
+            .await
+            .insert(id, User::new(id, session_id));
         debug!("created user: {:?}", id);
         id
     }
@@ -101,14 +104,6 @@ impl UserManager {
         Ok(())
     }
 
-    pub async fn set_session_id(&self, id: UserId, session_id: SessionId) {
-        self.inner
-            .write()
-            .await
-            .get_mut(&id)
-            .map(|user| user.set_session_id(session_id));
-    }
-
     pub async fn is_registered(&self, id: UserId) -> bool {
         self.inner
             .read()
@@ -133,5 +128,13 @@ impl UserManager {
             .await
             .get(&id)
             .map(|user| user.get_nickname().to_string())
+    }
+
+    pub async fn get_session_id(&self, id: UserId) -> Option<SessionId> {
+        self.inner
+            .read()
+            .await
+            .get(&id)
+            .map(|user| user.get_session_id())
     }
 }
