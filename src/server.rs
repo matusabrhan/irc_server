@@ -1,12 +1,8 @@
 use crate::{
-    config::CONFIG,
     dispatch::context::Context,
     manager::{channel::ChannelManager, session::SessionManager, user::UserManager},
 };
-use irc_proto::{
-    connection::Connection,
-    message::{Command as Cmd, Message, Source},
-};
+use irc_proto::{connection::Connection, message::Message};
 use log::{debug, info};
 use std::{io, net::SocketAddr, time::Duration};
 use tokio::{
@@ -56,7 +52,7 @@ impl Server {
                         let exit_sess_mgr = session_mgr.clone();
                         let exit_user_mgr = user_mgr.clone();
                         tokio::spawn(async move {
-                            Server::run_session(read, ctx).await;
+                            let _exit_status = Server::run_session(read, ctx).await;
                             exit_user_mgr.delete_user(user_id).await;
                             exit_sess_mgr.delete_session(session_id).await;
                         });
@@ -71,35 +67,30 @@ impl Server {
         Ok(server)
     }
 
-    async fn run_session(mut read: mpsc::UnboundedReceiver<Message>, mut ctx: Context) {
+    async fn run_session(
+        mut read: mpsc::UnboundedReceiver<Message>,
+        mut ctx: Context,
+    ) -> Result<(), ()> {
         let ctx = loop {
             match read.recv().await {
                 Some(msg) => {
                     info!("user: {:?}", msg);
-                    if ctx.handle(msg).await.is_err() {
-                        return;
-                    }
+                    ctx.handle(msg).await?;
                     ctx = match ctx.register().await {
                         Ok(registered_ctx) => break registered_ctx,
                         Err(unregistered_ctx) => unregistered_ctx,
                     };
                 }
-                None => {
-                    return;
-                }
+                None => return Ok(()),
             }
         };
 
-        if ctx.welcome().await.is_err() {
-            return;
-        }
-
+        ctx.welcome().await?;
         while let Some(msg) = read.recv().await {
             info!("{:?}: {:?}", ctx.get_nickname().await, msg);
-            if ctx.handle(msg).await.is_err() {
-                return;
-            }
+            ctx.handle(msg).await?
         }
+        Ok(())
     }
 
     fn spawn_connection_task(
