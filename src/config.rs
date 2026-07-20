@@ -43,6 +43,6 @@ impl Config {
         config.server.time = Local::now().to_rfc3339();
         config.server.version = env!("CARGO_PKG_VERSION").to_string();
 
-        return config;
+        config
     }
 }

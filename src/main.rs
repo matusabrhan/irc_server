@@ -6,7 +6,7 @@ async fn main() -> Result<(), ()> {
     enable_logging();
 
     let address = CONFIG.server.address.clone();
-    let server = Server::start(address).await?;
+    let server = Server::start(address).await;
     tokio::signal::ctrl_c()
         .await
         .expect("failed to listen to event");

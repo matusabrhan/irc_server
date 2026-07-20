@@ -26,9 +26,7 @@ async fn start_server() -> (broadcast::Sender<()>, SocketAddr) {
         rng.random_range(1025..u16::MAX) as u16,
     ));
 
-    let server = Server::start(address)
-        .await
-        .expect("could not start server");
+    let server = Server::start(address).await;
     tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await

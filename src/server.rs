@@ -1,151 +1,124 @@
-use crate::{
-    dispatch::context::Context,
-    manager::{channel::ChannelManager, session::SessionManager, user::UserManager},
-};
-use irc_proto::{connection::Connection, message::Message};
+use crate::{manager::Manager, session::Session};
 use log::{debug, info};
-use std::{io, net::SocketAddr, time::Duration};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc},
-    task::JoinHandle,
-    time::sleep,
-};
+use std::collections::HashMap;
+use std::{net::SocketAddr, time::Duration};
+use tokio::sync::{mpsc, oneshot};
+use tokio::{net::TcpListener, sync::broadcast, task::JoinHandle, time::sleep};
+
+pub struct ServerEndpoint {
+    pub tx: mpsc::UnboundedSender<ServerMessage>,
+    pub rx: mpsc::UnboundedReceiver<ServerMessage>,
+}
+
+pub struct RpcMessage<T, TRes> {
+    pub request: T,
+    pub reply: oneshot::Sender<TRes>,
+}
+
+impl<T> RpcMessage<T, Result<(), ()>> {
+    pub fn new(
+        contents: T,
+    ) -> (
+        RpcMessage<T, Result<(), ()>>,
+        oneshot::Receiver<Result<(), ()>>,
+    ) {
+        let (tx, rx) = oneshot::channel::<Result<(), ()>>();
+        (
+            RpcMessage {
+                request: contents,
+                reply: tx,
+            },
+            rx,
+        )
+    }
+}
+
+pub struct Request<T> {
+    pub id: usize,
+    pub msg: T,
+}
+
+impl<T> Request<T> {
+    pub fn new(id: usize, msg: T) -> Self {
+        Self { id, msg }
+    }
+}
+
+pub enum ServerMessage {
+    RegisterSessionRequest(usize, mpsc::UnboundedSender<ManagerMessage>),
+}
+
+pub enum ManagerMessage {}
+
+pub enum SessionMessage {
+    RegisterNickname(RpcMessage<Request<String>, Result<(), ()>>),
+}
+
+impl ServerEndpoint {
+    fn new_multicast() -> (Self, Self) {
+        let (tx1, rx2) = mpsc::unbounded_channel::<ServerMessage>();
+        let (tx2, rx1) = mpsc::unbounded_channel::<ServerMessage>();
+
+        (Self { tx: tx1, rx: rx1 }, Self { tx: tx2, rx: rx2 })
+    }
+}
 
 pub struct Server {
-    session_manager: SessionManager,
-    user_manager: UserManager,
-    channel_manager: ChannelManager,
-    listener_handle: JoinHandle<io::Result<()>>,
-    shutdown_tx: broadcast::Sender<()>,
+    handle: JoinHandle<()>,
+    cancel: broadcast::Sender<()>,
 }
 
 impl Server {
-    fn new() -> Self {
-        Self {
-            session_manager: SessionManager::new(),
-            user_manager: UserManager::new(),
-            channel_manager: ChannelManager::new(),
-            listener_handle: tokio::spawn(async { Ok(()) }),
-            shutdown_tx: broadcast::channel(1).0,
-        }
-    }
+    pub async fn start(address: SocketAddr) -> Self {
+        let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
 
-    pub async fn start(address: SocketAddr) -> Result<Self, ()> {
-        let mut server = Self::new();
-        let session_mgr = server.session_manager.clone();
-        let user_mgr = server.user_manager.clone();
-        let channel_mgr = server.channel_manager.clone();
-        let mut shutdown = server.subscribe_shutdown();
+        let handle = tokio::spawn(async move {
+            let listener = TcpListener::bind(address)
+                .await
+                .expect("could not start server");
+            let (server_endpoint1, mut server_endpoint2) = ServerEndpoint::new_multicast();
+            let manager = Manager::start(server_endpoint1);
 
-        server.listener_handle = tokio::spawn(async move {
-            let listener = TcpListener::bind(address).await?;
+            let mut ids: Vec<usize> = (1..256).collect();
+            let mut sessions: HashMap<usize, Session> = HashMap::new();
+
             loop {
                 tokio::select! {
                     Ok((stream, addr)) = listener.accept() => {
                         debug!("connection from {:}", addr);
 
-                        let (write, read) = Server::spawn_connection_task(stream, shutdown.resubscribe());
-                        let session_id = session_mgr.create_session(write).await;
-                        let user_id = user_mgr.create_user(session_id).await;
-                        let ctx = Context::new(session_id, user_id, session_mgr.clone(), user_mgr.clone(), channel_mgr.clone());
-                        let exit_sess_mgr = session_mgr.clone();
-                        let exit_user_mgr = user_mgr.clone();
-                        tokio::spawn(async move {
-                            let _exit_status = Server::run_session(read, ctx).await;
-                            exit_user_mgr.delete_user(user_id).await;
-                            exit_sess_mgr.delete_session(session_id).await;
-                        });
+                        match ids.pop() {
+                            Some(id) => {
+                                // let (endpoint, tx) = SessionEndpoint::new(manager.new_request_sender());
+                                let (session, request_sender) = Session::start(stream, id, manager.new_request_sender());
+                                sessions.insert(id, session);
+                                server_endpoint2.tx.send(ServerMessage::RegisterSessionRequest(id, request_sender));
+                            }
+                            None => {}
+                        }
                     }
-                    _ = shutdown.recv() => break,
+
+                    Some(msg) = server_endpoint2.rx.recv() => {},
+
+                    _ = cancel_rx.recv() => break,
                 }
             }
-            Ok(())
+            manager.stop();
         });
 
-        info!("Server started at {:}", address);
-        Ok(server)
-    }
-
-    async fn run_session(
-        mut read: mpsc::UnboundedReceiver<Message>,
-        mut ctx: Context,
-    ) -> Result<(), ()> {
-        let ctx = loop {
-            match read.recv().await {
-                Some(msg) => {
-                    info!("user: {:?}", msg);
-                    ctx.handle(msg).await?;
-                    ctx = match ctx.register().await {
-                        Ok(registered_ctx) => break registered_ctx,
-                        Err(unregistered_ctx) => unregistered_ctx,
-                    };
-                }
-                None => return Ok(()),
-            }
-        };
-
-        ctx.welcome().await?;
-        while let Some(msg) = read.recv().await {
-            info!("{:?}: {:?}", ctx.get_nickname().await, msg);
-            ctx.handle(msg).await?
+        Self {
+            handle,
+            cancel: cancel_tx,
         }
-        Ok(())
-    }
-
-    fn spawn_connection_task(
-        stream: TcpStream,
-        mut shutdown: broadcast::Receiver<()>,
-    ) -> (
-        mpsc::UnboundedSender<Message>,
-        mpsc::UnboundedReceiver<Message>,
-    ) {
-        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Message>();
-        let (read_tx, read_rx) = mpsc::unbounded_channel::<Message>();
-
-        let mut conn = Connection::new(stream);
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    msg = conn.read() => {
-                        match msg {
-                            Ok(msg) => {
-                                if let Err(_) = read_tx.send(msg) {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    msg = write_rx.recv() => {
-                        match msg {
-                            Some(msg) => {
-                                if let Err(_) = conn.write(msg).await {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                    _ = shutdown.recv() => break,
-                }
-            }
-            write_rx.close();
-        });
-        (write_tx, read_rx)
-    }
-
-    pub fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {
-        self.shutdown_tx.subscribe()
     }
 
     pub async fn shutdown(&self) {
         // TODO: await listener_handle ?
         info!("Server shutting down");
-        let mut remaining = self.shutdown_tx.send(());
+        let mut remaining = self.cancel.send(());
         while remaining.is_ok() {
             sleep(Duration::from_millis(100)).await;
-            remaining = self.shutdown_tx.send(());
+            remaining = self.cancel.send(());
         }
     }
 }
