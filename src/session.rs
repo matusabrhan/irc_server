@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use crate::{
     config::CONFIG,
+    manager::Manager,
     server::{ManagerMessage, Request, RpcMessage, SessionMessage},
     transport::Transport,
 };
@@ -8,6 +11,7 @@ use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
+    time,
 };
 
 #[derive(Default)]
@@ -31,7 +35,7 @@ impl RegistrationState {
     }
 }
 
-pub struct SessionEndpoint<TReq, TRes> {
+struct SessionEndpoint<TReq, TRes> {
     request_receiver: mpsc::UnboundedReceiver<TReq>,
     response_sender: mpsc::UnboundedSender<TRes>,
 }
@@ -51,11 +55,11 @@ impl SessionEndpoint<ManagerMessage, SessionMessage> {
         )
     }
 
-    pub async fn recv(&mut self) -> Option<ManagerMessage> {
+    async fn recv(&mut self) -> Option<ManagerMessage> {
         self.request_receiver.recv().await
     }
 
-    pub fn send(&self, msg: SessionMessage) -> Result<(), mpsc::error::SendError<SessionMessage>> {
+    fn send(&self, msg: SessionMessage) -> Result<(), mpsc::error::SendError<SessionMessage>> {
         self.response_sender.send(msg)
     }
 }
@@ -101,7 +105,7 @@ impl Session {
                     _ = cancel_rx.recv() => break,
                 }
             }
-            transport.stop();
+            transport.stop().await;
         });
 
         (
@@ -113,8 +117,13 @@ impl Session {
         )
     }
 
-    pub fn stop(&self) {
-        self.cancel.send(());
+    pub async fn stop(&self) {
+        while self.cancel.send(()).is_ok() {
+            time::sleep(Duration::from_millis(100)).await;
+        }
+        if !self.handle.is_finished() {
+            self.handle.abort();
+        }
     }
 }
 
@@ -228,7 +237,7 @@ impl SessionContext {
                 self.realname = realname.to_string();
                 self.registration.set(RegistrationState::USER, true);
                 if self.registration.check(RegistrationState::ALL) {
-                    self.send_welcome(transport);
+                    self.send_welcome(transport)?;
                 }
                 Ok(())
             }
@@ -255,8 +264,25 @@ impl SessionContext {
                 self.nickname = nickname.clone();
                 self.registration.set(RegistrationState::NICK, true);
                 if self.registration.check(RegistrationState::ALL) {
-                    self.send_welcome(transport);
+                    self.send_welcome(transport)?;
                 }
+                Ok(())
+            }
+
+            Command::PRIVMSG { targets, text } => {
+                if !self.registration.check(RegistrationState::ALL) {
+                    return Ok(());
+                }
+                endpoint
+                    .send(SessionMessage::PrivateMessage(Request::new(
+                        self.id,
+                        (
+                            targets.to_string(),
+                            msg.with_source(Source::default().with_name(self.nickname.clone())),
+                        ),
+                    )))
+                    .map_err(|_| ())?;
+
                 Ok(())
             }
 
@@ -269,6 +295,11 @@ impl SessionContext {
         msg: ManagerMessage,
         transport: &Transport,
         endpoint: &SessionEndpoint<ManagerMessage, SessionMessage>,
-    ) {
+    ) -> Result<(), ()> {
+        match msg {
+            ManagerMessage::PrivateMessage(priv_message) => {
+                transport.send(priv_message).map_err(|_| ())
+            }
+        }
     }
 }

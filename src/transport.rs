@@ -1,8 +1,11 @@
+use std::time::Duration;
+
 use irc_proto::{connection::Connection, message::Message};
 use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
+    time,
 };
 
 pub struct Transport {
@@ -64,7 +67,12 @@ impl Transport {
         self.tx.send(msg)
     }
 
-    pub fn stop(&self) {
-        self.cancel.send(());
+    pub async fn stop(&self) {
+        while self.cancel.send(()).is_ok() {
+            time::sleep(Duration::from_millis(100)).await;
+        }
+        if !self.handle.is_finished() {
+            self.handle.abort();
+        }
     }
 }

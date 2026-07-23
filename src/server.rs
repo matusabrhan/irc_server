@@ -1,4 +1,5 @@
 use crate::{manager::Manager, session::Session};
+use irc_proto::message::{Command, Message};
 use log::{debug, info};
 use std::collections::HashMap;
 use std::{net::SocketAddr, time::Duration};
@@ -6,8 +7,25 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::{net::TcpListener, sync::broadcast, task::JoinHandle, time::sleep};
 
 pub struct ServerEndpoint {
-    pub tx: mpsc::UnboundedSender<ServerMessage>,
-    pub rx: mpsc::UnboundedReceiver<ServerMessage>,
+    tx: mpsc::UnboundedSender<ServerMessage>,
+    rx: mpsc::UnboundedReceiver<ServerMessage>,
+}
+
+impl ServerEndpoint {
+    pub fn new_multicast() -> (Self, Self) {
+        let (tx1, rx2) = mpsc::unbounded_channel::<ServerMessage>();
+        let (tx2, rx1) = mpsc::unbounded_channel::<ServerMessage>();
+
+        (Self { tx: tx1, rx: rx1 }, Self { tx: tx2, rx: rx2 })
+    }
+
+    pub async fn recv(&mut self) -> Option<ServerMessage> {
+        self.rx.recv().await
+    }
+
+    fn send(&self, msg: ServerMessage) -> Result<(), mpsc::error::SendError<ServerMessage>> {
+        self.tx.send(msg)
+    }
 }
 
 pub struct RpcMessage<T, TRes> {
@@ -48,19 +66,13 @@ pub enum ServerMessage {
     RegisterSessionRequest(usize, mpsc::UnboundedSender<ManagerMessage>),
 }
 
-pub enum ManagerMessage {}
+pub enum ManagerMessage {
+    PrivateMessage(Message),
+}
 
 pub enum SessionMessage {
     RegisterNickname(RpcMessage<Request<String>, Result<(), ()>>),
-}
-
-impl ServerEndpoint {
-    fn new_multicast() -> (Self, Self) {
-        let (tx1, rx2) = mpsc::unbounded_channel::<ServerMessage>();
-        let (tx2, rx1) = mpsc::unbounded_channel::<ServerMessage>();
-
-        (Self { tx: tx1, rx: rx1 }, Self { tx: tx2, rx: rx2 })
-    }
+    PrivateMessage(Request<(String, Message)>),
 }
 
 pub struct Server {
@@ -89,10 +101,9 @@ impl Server {
 
                         match ids.pop() {
                             Some(id) => {
-                                // let (endpoint, tx) = SessionEndpoint::new(manager.new_request_sender());
                                 let (session, request_sender) = Session::start(stream, id, manager.new_request_sender());
                                 sessions.insert(id, session);
-                                server_endpoint2.tx.send(ServerMessage::RegisterSessionRequest(id, request_sender));
+                                let _ = server_endpoint2.send(ServerMessage::RegisterSessionRequest(id, request_sender));
                             }
                             None => {}
                         }
@@ -103,7 +114,10 @@ impl Server {
                     _ = cancel_rx.recv() => break,
                 }
             }
-            manager.stop();
+            manager.stop().await;
+            for session in sessions.values() {
+                session.stop().await;
+            }
         });
 
         Self {
@@ -113,12 +127,12 @@ impl Server {
     }
 
     pub async fn shutdown(&self) {
-        // TODO: await listener_handle ?
         info!("Server shutting down");
-        let mut remaining = self.cancel.send(());
-        while remaining.is_ok() {
+        while self.cancel.send(()).is_ok() {
             sleep(Duration::from_millis(100)).await;
-            remaining = self.cancel.send(());
+        }
+        if !self.handle.is_finished() {
+            self.handle.abort();
         }
     }
 }
