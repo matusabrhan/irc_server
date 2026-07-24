@@ -1,5 +1,5 @@
 use crate::{manager::Manager, session::Session};
-use irc_proto::message::{Command, Message};
+use irc_proto::message::Message;
 use log::{debug, info};
 use std::collections::HashMap;
 use std::{net::SocketAddr, time::Duration};
@@ -33,14 +33,9 @@ pub struct RpcMessage<T, TRes> {
     pub reply: oneshot::Sender<TRes>,
 }
 
-impl<T> RpcMessage<T, Result<(), ()>> {
-    pub fn new(
-        contents: T,
-    ) -> (
-        RpcMessage<T, Result<(), ()>>,
-        oneshot::Receiver<Result<(), ()>>,
-    ) {
-        let (tx, rx) = oneshot::channel::<Result<(), ()>>();
+impl<TReq, TRes> RpcMessage<TReq, TRes> {
+    pub fn new(contents: TReq) -> (RpcMessage<TReq, TRes>, oneshot::Receiver<TRes>) {
+        let (tx, rx) = oneshot::channel::<TRes>();
         (
             RpcMessage {
                 request: contents,
@@ -72,7 +67,9 @@ pub enum ManagerMessage {
 
 pub enum SessionMessage {
     RegisterNickname(RpcMessage<Request<String>, Result<(), ()>>),
-    PrivateMessage(Request<(String, Message)>),
+    PrivateMessage(Request<(Vec<String>, Message)>),
+    // JoninChannels(Request<(Vec<String>, Option<Vec<String>>)>),
+    JoinChannels(RpcMessage<Request<(Vec<String>, Option<Vec<String>>)>, Vec<String>>),
 }
 
 pub struct Server {

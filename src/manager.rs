@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::Duration,
-};
+use std::{collections::HashMap, time::Duration};
 
 use log::info;
 use tokio::{
@@ -10,7 +7,7 @@ use tokio::{
     time,
 };
 
-use crate::server::{ManagerMessage, Request, ServerEndpoint, ServerMessage, SessionMessage};
+use crate::server::{ManagerMessage, ServerEndpoint, ServerMessage, SessionMessage};
 
 pub struct Manager {
     handle: JoinHandle<()>,
@@ -25,7 +22,8 @@ struct ManagerEndpoint<TReq, TRes> {
 }
 
 struct ManagerContext {
-    usernames: HashMap<usize, String>,
+    nicknames: HashMap<usize, String>,
+    channels: HashMap<String, Vec<usize>>,
 }
 
 impl ManagerEndpoint<SessionMessage, ManagerMessage> {
@@ -39,15 +37,15 @@ impl ManagerEndpoint<SessionMessage, ManagerMessage> {
         }
     }
 
-    pub fn new_session_sender(&self) -> mpsc::UnboundedSender<SessionMessage> {
+    fn new_session_sender(&self) -> mpsc::UnboundedSender<SessionMessage> {
         self._request_sender.clone()
     }
 
-    pub fn add_sender(&mut self, id: usize, sender: mpsc::UnboundedSender<ManagerMessage>) {
+    fn add_sender(&mut self, id: usize, sender: mpsc::UnboundedSender<ManagerMessage>) {
         self.response_sender_map.insert(id, sender);
     }
 
-    pub fn send_session(
+    fn send_session(
         &self,
         id: usize,
         msg: ManagerMessage,
@@ -115,8 +113,16 @@ impl Manager {
 impl ManagerContext {
     fn new() -> Self {
         Self {
-            usernames: HashMap::new(),
+            nicknames: HashMap::new(),
+            channels: HashMap::new(),
         }
+    }
+
+    fn find_nickname_id(&self, nickname: &str) -> Option<usize> {
+        self.nicknames
+            .iter()
+            .find(|(_, v)| *v == nickname)
+            .map(|(k, _)| *k)
     }
 
     fn handle_session_msg(
@@ -127,7 +133,7 @@ impl ManagerContext {
         match msg {
             SessionMessage::RegisterNickname(rpc_msg) => {
                 match self
-                    .usernames
+                    .nicknames
                     .values()
                     .find(|val| **val == rpc_msg.request.msg)
                 {
@@ -135,7 +141,7 @@ impl ManagerContext {
                         let _ = rpc_msg.reply.send(Result::Err(()));
                     }
                     None => {
-                        self.usernames
+                        self.nicknames
                             .insert(rpc_msg.request.id, rpc_msg.request.msg);
                         let _ = rpc_msg.reply.send(Result::Ok(()));
                     }
@@ -144,24 +150,47 @@ impl ManagerContext {
 
             SessionMessage::PrivateMessage(request) => {
                 let source = self
-                    .usernames
+                    .nicknames
                     .get(&request.id)
                     .expect("id must be assigned");
-                info!("targets: {:}", request.msg.0);
-                for target in request.msg.0.split(",") {
-                    if let Some(target_id) = self
-                        .usernames
-                        .iter()
-                        .find(|(_, v)| **v == target)
-                        .map(|(k, _)| *k)
-                    {
-                        info!("target id: {:}", target_id);
-                        let _ = endpoint.send_session(
-                            target_id,
-                            ManagerMessage::PrivateMessage(request.msg.1.clone()),
-                        );
+                for ref target in request.msg.0 {
+                    if target == source {
+                        continue;
+                    }
+
+                    match self.find_nickname_id(target) {
+                        Some(target_id) => {
+                            let _ = endpoint.send_session(
+                                target_id,
+                                ManagerMessage::PrivateMessage(request.msg.1.clone()),
+                            );
+                        }
+                        None => {
+                            if let Some(channel_member_ids) = self.channels.get(target) {
+                                for member_id in channel_member_ids {
+                                    let _ = endpoint.send_session(
+                                        *member_id,
+                                        ManagerMessage::PrivateMessage(request.msg.1.clone()),
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
+            }
+
+            SessionMessage::JoinChannels(rpc_msg) => {
+                // TODO: handle channel passwords
+
+                let mut joined_channels: Vec<String> = Vec::new();
+                for channel_name in rpc_msg.request.msg.0 {
+                    joined_channels.push(channel_name.clone());
+                    self.channels
+                        .entry(channel_name)
+                        .or_default()
+                        .push(rpc_msg.request.id);
+                }
+                let _ = rpc_msg.reply.send(joined_channels);
             }
         }
     }

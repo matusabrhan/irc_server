@@ -148,7 +148,7 @@ async fn test_message() {
     client2.skip_msgs(4).await;
 
     client1.send(Command::PRIVMSG {
-        targets: "user2".to_string(),
+        targets: vec!["user2".to_string()],
         text: "hello".to_string(),
     });
 
@@ -168,7 +168,7 @@ async fn test_channel() {
     client1.connect(address, Some("password")).await;
     client1.skip_msgs(4).await;
     client1.send(Command::JOIN {
-        channels: "#channel1".to_string(),
+        channels: vec!["#channel1".to_string()],
         keys: None,
     });
 
@@ -182,7 +182,7 @@ async fn test_channel() {
     client2.connect(address, Some("password")).await;
     client2.skip_msgs(4).await;
     client2.send(Command::JOIN {
-        channels: "#channel1".to_string(),
+        channels: vec!["#channel1".to_string()],
         keys: None,
     });
 
@@ -193,7 +193,7 @@ async fn test_channel() {
     );
 
     client1.send(Command::PRIVMSG {
-        targets: "#channel1".to_string(),
+        targets: vec!["#channel1".to_string()],
         text: "hello".to_string(),
     });
 

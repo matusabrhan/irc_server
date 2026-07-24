@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use crate::{
     config::CONFIG,
-    manager::Manager,
     server::{ManagerMessage, Request, RpcMessage, SessionMessage},
     transport::Transport,
 };
@@ -99,7 +98,9 @@ impl Session {
                     }
 
                     Some(msg) = endpoint.recv() => {
-                        ctx.handle_manager_msg( msg, &transport, &endpoint);
+                        if ctx.handle_manager_msg(msg, &transport, &endpoint).is_err() {
+                            break
+                        }
                     }
 
                     _ = cancel_rx.recv() => break,
@@ -269,7 +270,7 @@ impl SessionContext {
                 Ok(())
             }
 
-            Command::PRIVMSG { targets, text } => {
+            Command::PRIVMSG { targets, .. } => {
                 if !self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
@@ -277,11 +278,36 @@ impl SessionContext {
                     .send(SessionMessage::PrivateMessage(Request::new(
                         self.id,
                         (
-                            targets.to_string(),
+                            targets.to_owned(),
                             msg.with_source(Source::default().with_name(self.nickname.clone())),
                         ),
                     )))
                     .map_err(|_| ())?;
+
+                Ok(())
+            }
+
+            Command::JOIN { channels, keys } => {
+                if !self.registration.check(RegistrationState::ALL) {
+                    return Ok(());
+                }
+
+                let (rpc_msg, rx) =
+                    RpcMessage::new(Request::new(self.id, (channels.clone(), keys.clone())));
+                endpoint
+                    .send(SessionMessage::JoinChannels(rpc_msg))
+                    .map_err(|_| ())?;
+                if let Ok(joined_channels) = rx.await {
+                    transport
+                        .send(
+                            msg.with_command(Command::JOIN {
+                                channels: joined_channels,
+                                keys: None,
+                            })
+                            .with_source(Source::default().with_name(self.nickname.clone())),
+                        )
+                        .map_err(|_| ())?
+                }
 
                 Ok(())
             }
