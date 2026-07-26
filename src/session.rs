@@ -81,7 +81,6 @@ impl Session {
     pub fn start(
         stream: TcpStream,
         id: usize,
-        // mut endpoint: SessionEndpoint<ManagerMessage, SessionMessage>,
         request_sender: mpsc::UnboundedSender<SessionMessage>,
     ) -> (Self, mpsc::UnboundedSender<ManagerMessage>) {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
@@ -98,15 +97,14 @@ impl Session {
                     }
 
                     Some(msg) = endpoint.recv() => {
-                        if ctx.handle_manager_msg(msg, &transport, &endpoint).is_err() {
-                            break
-                        }
+                        if ctx.handle_manager_msg(msg, &transport, &endpoint).is_err() { break }
                     }
 
                     _ = cancel_rx.recv() => break,
                 }
             }
             transport.stop().await;
+            let _ = endpoint.send(SessionMessage::Quit(Request::new(id, ())));
         });
 
         (
@@ -311,6 +309,8 @@ impl SessionContext {
 
                 Ok(())
             }
+
+            Command::QUIT { .. } => Err(()),
 
             _ => Ok(()),
         }

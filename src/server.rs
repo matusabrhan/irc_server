@@ -58,7 +58,8 @@ impl<T> Request<T> {
 }
 
 pub enum ServerMessage {
-    RegisterSessionRequest(usize, mpsc::UnboundedSender<ManagerMessage>),
+    RegisterSession(usize, mpsc::UnboundedSender<ManagerMessage>),
+    CloseSession(usize),
 }
 
 pub enum ManagerMessage {
@@ -68,8 +69,8 @@ pub enum ManagerMessage {
 pub enum SessionMessage {
     RegisterNickname(RpcMessage<Request<String>, Result<(), ()>>),
     PrivateMessage(Request<(Vec<String>, Message)>),
-    // JoninChannels(Request<(Vec<String>, Option<Vec<String>>)>),
     JoinChannels(RpcMessage<Request<(Vec<String>, Option<Vec<String>>)>, Vec<String>>),
+    Quit(Request<()>),
 }
 
 pub struct Server {
@@ -100,13 +101,27 @@ impl Server {
                             Some(id) => {
                                 let (session, request_sender) = Session::start(stream, id, manager.new_request_sender());
                                 sessions.insert(id, session);
-                                let _ = server_endpoint2.send(ServerMessage::RegisterSessionRequest(id, request_sender));
+                                let _ = server_endpoint2.send(ServerMessage::RegisterSession(id, request_sender));
                             }
                             None => {}
                         }
                     }
 
-                    Some(msg) = server_endpoint2.rx.recv() => {},
+                    Some(msg) = server_endpoint2.rx.recv() => {
+                        match msg {
+                            ServerMessage::CloseSession(id) => {
+                                if let Some(session) = sessions.remove(&id) {
+                                    ids.push(id);
+                                    session.stop().await
+                                }
+                            }
+
+                            ServerMessage::RegisterSession(..) => {
+                                unreachable!();
+                            }
+
+                        }
+                    },
 
                     _ = cancel_rx.recv() => break,
                 }
@@ -117,6 +132,7 @@ impl Server {
             }
         });
 
+        info!("Server listening on {:}", address.to_string());
         Self {
             handle,
             cancel: cancel_tx,

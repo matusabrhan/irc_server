@@ -1,6 +1,8 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
-use log::info;
 use tokio::{
     sync::{broadcast, mpsc},
     task::JoinHandle,
@@ -23,7 +25,7 @@ struct ManagerEndpoint<TReq, TRes> {
 
 struct ManagerContext {
     nicknames: HashMap<usize, String>,
-    channels: HashMap<String, Vec<usize>>,
+    channels: HashMap<String, HashSet<usize>>,
 }
 
 impl ManagerEndpoint<SessionMessage, ManagerMessage> {
@@ -77,9 +79,14 @@ impl Manager {
 
                     Some(msg) = server_endpoint.recv() => {
                         match msg {
-                            ServerMessage::RegisterSessionRequest(id, channel) => {
+                            ServerMessage::RegisterSession(id, channel) => {
                                 endpoint.response_sender_map.insert(id, channel);
                             }
+
+                            ServerMessage::CloseSession(..) => {
+                                unreachable!();
+                            }
+
                         };
                     }
 
@@ -152,7 +159,7 @@ impl ManagerContext {
                 let source = self
                     .nicknames
                     .get(&request.id)
-                    .expect("id must be assigned");
+                    .expect("nick must be known when sending private message");
                 for ref target in request.msg.0 {
                     if target == source {
                         continue;
@@ -188,9 +195,17 @@ impl ManagerContext {
                     self.channels
                         .entry(channel_name)
                         .or_default()
-                        .push(rpc_msg.request.id);
+                        .insert(rpc_msg.request.id);
                 }
                 let _ = rpc_msg.reply.send(joined_channels);
+            }
+
+            SessionMessage::Quit(request) => {
+                self.nicknames.remove(&request.id);
+                for channel in self.channels.values_mut() {
+                    channel.remove(&request.id);
+                }
+                todo!();
             }
         }
     }
