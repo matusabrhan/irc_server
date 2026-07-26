@@ -9,7 +9,7 @@ use tokio::{
     time,
 };
 
-use crate::server::{ManagerMessage, ServerEndpoint, ServerMessage, SessionMessage};
+use crate::ipc_bus::{ManagerBus, ManagerMessage, ServerBus, ServerMessage, SessionMessage};
 
 pub struct Manager {
     handle: JoinHandle<()>,
@@ -17,70 +17,29 @@ pub struct Manager {
     cancel: broadcast::Sender<()>,
 }
 
-struct ManagerEndpoint<TReq, TRes> {
-    request_receiver: mpsc::UnboundedReceiver<TReq>,
-    _request_sender: mpsc::UnboundedSender<TReq>,
-    response_sender_map: HashMap<usize, mpsc::UnboundedSender<TRes>>,
-}
-
 struct ManagerContext {
     nicknames: HashMap<usize, String>,
     channels: HashMap<String, HashSet<usize>>,
 }
 
-impl ManagerEndpoint<SessionMessage, ManagerMessage> {
-    fn new() -> Self {
-        let (_request_sender, request_receiver) = mpsc::unbounded_channel::<SessionMessage>();
-
-        Self {
-            request_receiver,
-            _request_sender,
-            response_sender_map: HashMap::new(),
-        }
-    }
-
-    fn new_session_sender(&self) -> mpsc::UnboundedSender<SessionMessage> {
-        self._request_sender.clone()
-    }
-
-    fn add_sender(&mut self, id: usize, sender: mpsc::UnboundedSender<ManagerMessage>) {
-        self.response_sender_map.insert(id, sender);
-    }
-
-    fn send_session(
-        &self,
-        id: usize,
-        msg: ManagerMessage,
-    ) -> Result<(), mpsc::error::SendError<ManagerMessage>> {
-        self.response_sender_map
-            .get(&id)
-            .expect("id not found")
-            .send(msg)
-    }
-
-    async fn recv_session(&mut self) -> Option<SessionMessage> {
-        self.request_receiver.recv().await
-    }
-}
-
 impl Manager {
-    pub fn start(mut server_endpoint: ServerEndpoint) -> Self {
+    pub fn start(server_bus: ServerBus) -> Self {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-        let mut endpoint = ManagerEndpoint::new();
-        let _request_sender = endpoint.new_session_sender();
+        let (mut bus, mut server_receiver) = ManagerBus::new(server_bus);
+        let _request_sender = bus.new_session_sender();
 
         let handle = tokio::spawn(async move {
             let mut ctx = ManagerContext::new();
             loop {
                 tokio::select! {
-                    Some(msg) = endpoint.recv_session() => {
-                        ctx.handle_session_msg(&mut endpoint, msg);
+                    Some(msg) = bus.session_recv() => {
+                        ctx.handle_session_msg(&mut bus, msg);
                     }
 
-                    Some(msg) = server_endpoint.recv() => {
+                    Some(msg) = server_receiver.recv() => {
                         match msg {
                             ServerMessage::RegisterSession(id, channel) => {
-                                endpoint.response_sender_map.insert(id, channel);
+                                bus.add_sender(id, channel);
                             }
 
                             ServerMessage::CloseSession(..) => {
@@ -132,11 +91,7 @@ impl ManagerContext {
             .map(|(k, _)| *k)
     }
 
-    fn handle_session_msg(
-        &mut self,
-        endpoint: &mut ManagerEndpoint<SessionMessage, ManagerMessage>,
-        msg: SessionMessage,
-    ) {
+    fn handle_session_msg(&mut self, bus: &mut ManagerBus, msg: SessionMessage) {
         match msg {
             SessionMessage::RegisterNickname(rpc_msg) => {
                 match self
@@ -167,7 +122,7 @@ impl ManagerContext {
 
                     match self.find_nickname_id(target) {
                         Some(target_id) => {
-                            let _ = endpoint.send_session(
+                            let _ = bus.session_send(
                                 target_id,
                                 ManagerMessage::PrivateMessage(request.msg.1.clone()),
                             );
@@ -175,7 +130,7 @@ impl ManagerContext {
                         None => {
                             if let Some(channel_member_ids) = self.channels.get(target) {
                                 for member_id in channel_member_ids {
-                                    let _ = endpoint.send_session(
+                                    let _ = bus.session_send(
                                         *member_id,
                                         ManagerMessage::PrivateMessage(request.msg.1.clone()),
                                     );
@@ -205,7 +160,7 @@ impl ManagerContext {
                 for channel in self.channels.values_mut() {
                     channel.remove(&request.id);
                 }
-                todo!();
+                bus.server_send(ServerMessage::CloseSession(request.id));
             }
         }
     }

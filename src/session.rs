@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{
     config::CONFIG,
-    server::{ManagerMessage, Request, RpcMessage, SessionMessage},
+    ipc_bus::{ManagerMessage, Request, RpcMessage, SessionBus, SessionMessage},
     transport::Transport,
 };
 use irc_proto::message::{Command, Message, Source};
@@ -34,35 +34,6 @@ impl RegistrationState {
     }
 }
 
-struct SessionEndpoint<TReq, TRes> {
-    request_receiver: mpsc::UnboundedReceiver<TReq>,
-    response_sender: mpsc::UnboundedSender<TRes>,
-}
-
-impl SessionEndpoint<ManagerMessage, SessionMessage> {
-    fn new(
-        response_sender: mpsc::UnboundedSender<SessionMessage>,
-    ) -> (Self, mpsc::UnboundedSender<ManagerMessage>) {
-        let (request_sender, request_receiver) = mpsc::unbounded_channel::<ManagerMessage>();
-
-        (
-            Self {
-                request_receiver,
-                response_sender,
-            },
-            request_sender,
-        )
-    }
-
-    async fn recv(&mut self) -> Option<ManagerMessage> {
-        self.request_receiver.recv().await
-    }
-
-    fn send(&self, msg: SessionMessage) -> Result<(), mpsc::error::SendError<SessionMessage>> {
-        self.response_sender.send(msg)
-    }
-}
-
 #[derive(Default)]
 struct SessionContext {
     id: usize,
@@ -84,7 +55,7 @@ impl Session {
         request_sender: mpsc::UnboundedSender<SessionMessage>,
     ) -> (Self, mpsc::UnboundedSender<ManagerMessage>) {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-        let (mut endpoint, tx) = SessionEndpoint::new(request_sender);
+        let (mut bus, tx) = SessionBus::new(request_sender);
 
         let handle = tokio::spawn(async move {
             let mut transport = Transport::start(stream);
@@ -93,18 +64,18 @@ impl Session {
             loop {
                 tokio::select! {
                     Some(msg) = transport.recv() => {
-                        if ctx.handle_client_msg(msg, &transport, &endpoint).await.is_err() { break }
+                        if ctx.handle_client_msg(msg, &transport, &bus).await.is_err() { break }
                     }
 
-                    Some(msg) = endpoint.recv() => {
-                        if ctx.handle_manager_msg(msg, &transport, &endpoint).is_err() { break }
+                    Some(msg) = bus.recv() => {
+                        if ctx.handle_manager_msg(msg, &transport, &bus).is_err() { break }
                     }
 
                     _ = cancel_rx.recv() => break,
                 }
             }
             transport.stop().await;
-            let _ = endpoint.send(SessionMessage::Quit(Request::new(id, ())));
+            let _ = bus.send(SessionMessage::Quit(Request::new(id, ())));
         });
 
         (
@@ -193,7 +164,7 @@ impl SessionContext {
         &mut self,
         msg: Message,
         transport: &Transport,
-        endpoint: &SessionEndpoint<ManagerMessage, SessionMessage>,
+        bus: &SessionBus,
     ) -> Result<(), ()> {
         match msg.command() {
             Command::PING { token } => transport
@@ -243,8 +214,7 @@ impl SessionContext {
 
             Command::NICK { nickname } => {
                 let (rpc_msg, rx) = RpcMessage::new(Request::new(self.id, nickname.clone()));
-                endpoint
-                    .send(SessionMessage::RegisterNickname(rpc_msg))
+                bus.send(SessionMessage::RegisterNickname(rpc_msg))
                     .map_err(|_| ())?;
                 if rx.await.is_err() {
                     transport
@@ -272,15 +242,14 @@ impl SessionContext {
                 if !self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
-                endpoint
-                    .send(SessionMessage::PrivateMessage(Request::new(
-                        self.id,
-                        (
-                            targets.to_owned(),
-                            msg.with_source(Source::default().with_name(self.nickname.clone())),
-                        ),
-                    )))
-                    .map_err(|_| ())?;
+                bus.send(SessionMessage::PrivateMessage(Request::new(
+                    self.id,
+                    (
+                        targets.to_owned(),
+                        msg.with_source(Source::default().with_name(self.nickname.clone())),
+                    ),
+                )))
+                .map_err(|_| ())?;
 
                 Ok(())
             }
@@ -292,8 +261,7 @@ impl SessionContext {
 
                 let (rpc_msg, rx) =
                     RpcMessage::new(Request::new(self.id, (channels.clone(), keys.clone())));
-                endpoint
-                    .send(SessionMessage::JoinChannels(rpc_msg))
+                bus.send(SessionMessage::JoinChannels(rpc_msg))
                     .map_err(|_| ())?;
                 if let Ok(joined_channels) = rx.await {
                     transport
@@ -320,7 +288,7 @@ impl SessionContext {
         &mut self,
         msg: ManagerMessage,
         transport: &Transport,
-        endpoint: &SessionEndpoint<ManagerMessage, SessionMessage>,
+        bus: &SessionBus,
     ) -> Result<(), ()> {
         match msg {
             ManagerMessage::PrivateMessage(priv_message) => {
