@@ -9,7 +9,7 @@ use tokio::{
     time,
 };
 
-use crate::ipc_bus::{ManagerBus, ManagerMessage, ServerBus, ServerMessage, SessionMessage};
+use crate::ipc_bus::{ManagerBus, ManagerMessage, ServerBus, ServerMessage, SessionId, SessionMessage};
 
 pub struct Manager {
     handle: JoinHandle<()>,
@@ -18,8 +18,8 @@ pub struct Manager {
 }
 
 struct ManagerContext {
-    nicknames: HashMap<usize, String>,
-    channels: HashMap<String, HashSet<usize>>,
+    nicknames: HashMap<SessionId, String>,
+    channels: HashMap<String, HashSet<SessionId>>,
 }
 
 impl Manager {
@@ -84,7 +84,7 @@ impl ManagerContext {
         }
     }
 
-    fn find_nickname_id(&self, nickname: &str) -> Option<usize> {
+    fn find_nickname_id(&self, nickname: &str) -> Option<SessionId> {
         self.nicknames
             .iter()
             .find(|(_, v)| *v == nickname)
@@ -119,7 +119,7 @@ impl ManagerContext {
                     match self.find_nickname_id(target) {
                         Some(target_id) => {
                             let _ = bus.session_send(
-                                target_id,
+                                &target_id,
                                 ManagerMessage::PrivateMessage(request.msg.1.clone()),
                             );
                         }
@@ -127,7 +127,7 @@ impl ManagerContext {
                             if let Some(channel_member_ids) = self.channels.get(target) {
                                 for member_id in channel_member_ids {
                                     let _ = bus.session_send(
-                                        *member_id,
+                                        member_id,
                                         ManagerMessage::PrivateMessage(request.msg.1.clone()),
                                     );
                                 }

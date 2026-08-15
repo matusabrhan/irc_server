@@ -1,4 +1,4 @@
-use crate::ipc_bus::{ServerBus, ServerMessage};
+use crate::ipc_bus::{ServerBus, ServerMessage, SessionId};
 use crate::{manager::Manager, session::Session};
 use log::{debug, info};
 use std::collections::HashMap;
@@ -12,8 +12,8 @@ pub struct Server {
 }
 
 struct ServerContext {
-    ids: Vec<usize>,
-    sessions: HashMap<usize, Session>,
+    ids: Vec<SessionId>,
+    sessions: HashMap<SessionId, Session>,
 }
 
 impl Server {
@@ -54,6 +54,33 @@ impl Server {
         }
     }
 
+    async fn server_task(address: SocketAddr, mut cancel_rx: broadcast::Receiver<()>) {
+        let listener = TcpListener::bind(address)
+            .await
+            .expect("could not start server");
+        let (mut server_bus_local, server_bus_manager) = ServerBus::new_duplex();
+        let manager = Manager::start(server_bus_manager);
+        let mut ctx = ServerContext::new();
+
+        loop {
+            tokio::select! {
+                Ok((stream, addr)) = listener.accept() => {
+                    ctx.handle_new_session(stream, addr, &manager, &server_bus_local);
+                }
+
+                Some(msg) = server_bus_local.recv() => {
+                    ctx.handle_server_msg(msg, &manager, &server_bus_local).await;
+                },
+
+                _ = cancel_rx.recv() => break,
+            }
+        }
+        manager.stop().await;
+        for session in ctx.sessions.values() {
+            session.stop().await;
+        }
+    }
+
     pub async fn shutdown(&self) {
         info!("Server shutting down");
         while self.cancel.send(()).is_ok() {
@@ -68,7 +95,7 @@ impl Server {
 impl ServerContext {
     fn new() -> Self {
         Self {
-            ids: (1..256).collect(),
+            ids: (1..256).map(|id| SessionId(id)).collect(),
             sessions: HashMap::new(),
         }
     }

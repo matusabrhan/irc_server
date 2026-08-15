@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::{
     config::CONFIG,
-    ipc_bus::{ManagerMessage, Request, RpcMessage, SessionBus, SessionMessage},
+    ipc_bus::{ManagerMessage, Request, RpcMessage, SessionBus, SessionId, SessionMessage},
     transport::Transport,
 };
 use irc_proto::message::{Command, Message, Source};
@@ -36,19 +36,13 @@ impl RegistrationState {
 }
 
 struct SessionContext {
-    id: usize,
+    id: SessionId,
     nickname: String,
     username: String,
     realname: String,
     registration: RegistrationState,
     last_pong: Instant,
     interval: time::Interval
-}
-
-impl Default for SessionContext {
-    fn default() -> Self {
-        Self { id: 0, nickname: String::new(), username: String::new(), realname: String::new(), registration: RegistrationState::default(), last_pong: Instant::now(), interval: time::interval(Duration::from_secs(10)) }
-    }
 }
 
 pub struct Session {
@@ -59,7 +53,7 @@ pub struct Session {
 impl Session {
     pub fn start(
         stream: TcpStream,
-        id: usize,
+        id: SessionId,
         request_sender: mpsc::UnboundedSender<SessionMessage>,
     ) -> (Self, mpsc::UnboundedSender<ManagerMessage>) {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
@@ -125,10 +119,9 @@ impl Session {
 }
 
 impl SessionContext {
-    fn new(id: usize) -> Self {
+    fn new(id: SessionId) -> Self {
         Self {
-            id,
-            ..Default::default()
+            id, nickname: String::new(), username: String::new(), realname: String::new(), registration: RegistrationState::default(), last_pong: Instant::now(), interval: time::interval(Duration::from_secs(10)) 
         }
     }
 
