@@ -78,11 +78,8 @@ impl ManagerBus {
         &self,
         id: usize,
         msg: ManagerMessage,
-    ) -> Result<(), mpsc::error::SendError<ManagerMessage>> {
-        self.response_sender_map
-            .get(&id)
-            .expect("id not found")
-            .send(msg)
+    ) -> Result<(), ()> {
+        self.response_sender_map.get(&id).expect("id not found").send(msg).map_err(|_| ())
     }
 
     pub async fn session_recv(&mut self) -> Option<SessionMessage> {
@@ -92,8 +89,8 @@ impl ManagerBus {
     pub fn server_send(
         &self,
         msg: ServerMessage,
-    ) -> Result<(), mpsc::error::SendError<ServerMessage>> {
-        self.server_tx.send(msg)
+    ) -> Result<(), ()> {
+        self.server_tx.send(msg).map_err(|_| ())
     }
 }
 
@@ -116,8 +113,8 @@ impl SessionBus {
         self.request_receiver.recv().await
     }
 
-    pub fn send(&self, msg: SessionMessage) -> Result<(), mpsc::error::SendError<SessionMessage>> {
-        self.response_sender.send(msg)
+    pub fn send(&self, msg: SessionMessage) -> Result<(), ()> {
+        self.response_sender.send(msg).map_err(|_| ())
     }
 }
 

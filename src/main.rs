@@ -5,7 +5,7 @@ use irc_server::{config::CONFIG, server::Server};
 async fn main() -> Result<(), ()> {
     enable_logging();
 
-    let address = CONFIG.server.address.clone();
+    let address = CONFIG.server.address;
     let server = Server::start(address).await;
     tokio::signal::ctrl_c()
         .await

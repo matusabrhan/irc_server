@@ -47,7 +47,7 @@ impl Server {
             }
         });
 
-        info!("Server listening on {:}", address.to_string());
+        info!("Server listening on {:}", address);
         Self {
             handle,
             cancel: cancel_tx,
@@ -80,15 +80,12 @@ impl ServerContext {
         manager: &Manager,
         server_bus: &ServerBus,
     ) {
-        match self.ids.pop() {
-            Some(id) => {
-                let (session, request_sender) =
-                    Session::start(stream, id, manager.new_request_sender());
-                self.sessions.insert(id, session);
-                let _ = server_bus.send(ServerMessage::RegisterSession(id, request_sender));
-                debug!("opened session from {:} with id {:}", address, id)
-            }
-            None => {}
+        if let Some(id) = self.ids.pop() {
+            let (session, request_sender) =
+                Session::start(stream, id, manager.new_request_sender());
+            self.sessions.insert(id, session);
+            let _ = server_bus.send(ServerMessage::RegisterSession(id, request_sender));
+            debug!("opened session from {:} with id {:}", address, id)
         }
     }
 

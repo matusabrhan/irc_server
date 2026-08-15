@@ -204,3 +204,23 @@ async fn test_channel() {
     );
     server_stop.send(()).expect("server stopped");
 }
+
+
+#[tokio::test]
+async fn test_nickname_in_use() {
+    let (server_stop, address) = start_server().await;
+
+    let mut client1 = Client::new("user1");
+    client1.connect(address, Some("password")).await;
+    client1.skip_msgs(4).await;
+
+    let mut client2 = Client::new("user1");
+    client2.connect(address, Some("password")).await;
+    let message = client2.read().await.unwrap();
+    assert_eq!(
+        ":server1 433  \r\n".to_string(),
+        String::from_utf8(message.to_vec_u8()).unwrap()
+    );
+
+    server_stop.send(()).expect("server stopped");
+}

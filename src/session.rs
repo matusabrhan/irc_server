@@ -1,3 +1,4 @@
+use log::debug;
 use std::time::Duration;
 
 use crate::{
@@ -10,7 +11,7 @@ use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
-    time,
+    time::{self, Instant, Interval, interval},
 };
 
 #[derive(Default)]
@@ -34,13 +35,20 @@ impl RegistrationState {
     }
 }
 
-#[derive(Default)]
 struct SessionContext {
     id: usize,
     nickname: String,
     username: String,
     realname: String,
     registration: RegistrationState,
+    last_pong: Instant,
+    interval: time::Interval
+}
+
+impl Default for SessionContext {
+    fn default() -> Self {
+        Self { id: 0, nickname: String::new(), username: String::new(), realname: String::new(), registration: RegistrationState::default(), last_pong: Instant::now(), interval: time::interval(Duration::from_secs(10)) }
+    }
 }
 
 pub struct Session {
@@ -58,21 +66,28 @@ impl Session {
         let (mut bus, tx) = SessionBus::new(request_sender);
 
         let handle = tokio::spawn(async move {
+            let mut idle_interval = interval(Duration::from_secs(10));
             let mut transport = Transport::start(stream);
             let mut ctx = SessionContext::new(id);
 
             loop {
-                tokio::select! {
-                    Some(msg) = transport.recv() => {
-                        if ctx.handle_client_msg(msg, &transport, &bus).await.is_err() { break }
+                let result = tokio::select! {
+                    Some(msg) = Self::recv_client_message(&mut transport) => {
+                        ctx.handle_client_msg(msg, &transport, &bus).await
                     }
 
-                    Some(msg) = bus.recv() => {
-                        if ctx.handle_manager_msg(msg, &transport, &bus).is_err() { break }
+                    Some(msg) = Self::recv_manager_message(&mut bus) => {
+                        ctx.handle_manager_msg(msg, &transport, &bus)
                     }
 
-                    _ = cancel_rx.recv() => break,
-                }
+                    _ = Self::recv_idle_timer(&mut idle_interval) => {
+                        ctx.handle_idle_timer()
+                    }
+
+                    _ = cancel_rx.recv() => Err(()),
+                };
+
+                if result.is_err() { break }
             }
             transport.stop().await;
             let _ = bus.send(SessionMessage::Quit(Request::new(id, ())));
@@ -94,6 +109,18 @@ impl Session {
         if !self.handle.is_finished() {
             self.handle.abort();
         }
+    }
+
+    async fn recv_client_message(transport: &mut Transport) -> Option<Message> {
+        transport.recv().await
+    }
+
+    async fn recv_manager_message(bus: &mut SessionBus) -> Option<ManagerMessage> {
+        bus.recv().await
+    }
+
+    async fn recv_idle_timer(interval: &mut Interval) {
+        interval.tick().await;
     }
 }
 
@@ -166,17 +193,21 @@ impl SessionContext {
         transport: &Transport,
         bus: &SessionBus,
     ) -> Result<(), ()> {
+        debug!("session {:} received message: {:?}", self.id, msg);
         match msg.command() {
-            Command::PING { token } => transport
-                .send(
-                    Message::default()
-                        .with_source(Source::default().with_name(CONFIG.server.name.clone()))
-                        .with_command(Command::PONG {
-                            server: Some(CONFIG.server.name.clone()),
-                            token: token.to_string(),
-                        }),
-                )
-                .map_err(|_| ()),
+            Command::PING { token } => {
+                self.last_pong = Instant::now();
+                transport
+                    .send(
+                        Message::default()
+                            .with_source(Source::default().with_name(CONFIG.server.name.clone()))
+                            .with_command(Command::PONG {
+                                server: Some(CONFIG.server.name.clone()),
+                                token: token.to_string(),
+                            }),
+                    )
+                    .map_err(|_| ())
+            },
 
             Command::PASS { password } => {
                 if self.registration.check(RegistrationState::ALL) {
@@ -216,7 +247,8 @@ impl SessionContext {
                 let (rpc_msg, rx) = RpcMessage::new(Request::new(self.id, nickname.clone()));
                 bus.send(SessionMessage::RegisterNickname(rpc_msg))
                     .map_err(|_| ())?;
-                if rx.await.is_err() {
+
+                if let Ok(Err(())) = rx.await {
                     transport
                         .send(
                             Message::default()
@@ -229,6 +261,7 @@ impl SessionContext {
                                 }),
                         )
                         .map_err(|_| ())?;
+                    return Ok(())
                 }
                 self.nickname = nickname.clone();
                 self.registration.set(RegistrationState::NICK, true);
@@ -292,8 +325,17 @@ impl SessionContext {
     ) -> Result<(), ()> {
         match msg {
             ManagerMessage::PrivateMessage(priv_message) => {
+                debug!("session {:} sent message: {:?}", self.id, priv_message);
                 transport.send(priv_message).map_err(|_| ())
             }
         }
+    }
+
+    fn handle_idle_timer(&mut self) -> Result<(), ()> {
+        let now = Instant::now();
+        if self.last_pong + self.interval.period() < now {
+            return  Err(());
+        }
+        Ok(())
     }
 }

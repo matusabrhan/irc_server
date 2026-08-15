@@ -94,11 +94,7 @@ impl ManagerContext {
     fn handle_session_msg(&mut self, bus: &mut ManagerBus, msg: SessionMessage) {
         match msg {
             SessionMessage::RegisterNickname(rpc_msg) => {
-                match self
-                    .nicknames
-                    .values()
-                    .find(|val| **val == rpc_msg.request.msg)
-                {
+                match self.find_nickname_id(&rpc_msg.request.msg) {
                     Some(_) => {
                         let _ = rpc_msg.reply.send(Result::Err(()));
                     }

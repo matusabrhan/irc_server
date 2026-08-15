@@ -28,7 +28,7 @@ impl Transport {
                     msg = conn.read() => {
                         match msg {
                             Ok(msg) => {
-                                if let Err(_) = client_tx.send(msg) {
+                                if client_tx.send(msg).is_err() {
                                     break;
                                 }
                             }
@@ -38,7 +38,7 @@ impl Transport {
                     msg = client_rx.recv() => {
                         match msg {
                             Some(msg) => {
-                                if let Err(_) = conn.write(msg).await {
+                                if conn.write(msg).await.is_err() {
                                     break;
                                 }
                             }
@@ -63,8 +63,8 @@ impl Transport {
         self.rx.recv().await
     }
 
-    pub fn send(&self, msg: Message) -> Result<(), mpsc::error::SendError<Message>> {
-        self.tx.send(msg)
+    pub fn send(&self, msg: Message) -> Result<(), ()> {
+        self.tx.send(msg).map_err(|_| ())
     }
 
     pub async fn stop(&self) {
