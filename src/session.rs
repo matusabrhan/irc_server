@@ -1,18 +1,25 @@
 use log::debug;
-use std::time::Duration;
+use std::{fmt::Display, time::Duration};
 
 use crate::{
-    config::CONFIG,
-    ipc_bus::{ManagerMessage, Request, RpcMessage, SessionBus, SessionId, SessionMessage},
-    transport::Transport,
+    config::CONFIG, manager::{Event, JoinChannelsInfo, PrivateMessageInfo, Request, SessionToManagerMsg, SessionToManagerSender}, transport::Transport
 };
 use irc_proto::message::{Command, Message, Source};
 use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
-    time::{self, Instant, Interval, interval},
+    time::{self, Instant, interval},
 };
+
+
+
+pub enum ManagerToSessionMsg {
+    PrivateMessage(Message),
+}
+
+struct ManagerToSessionReceiver(mpsc::UnboundedReceiver<ManagerToSessionMsg>);
+pub struct ManagerToSessionSender(mpsc::UnboundedSender<ManagerToSessionMsg>);
 
 #[derive(Default)]
 struct RegistrationState(u8);
@@ -35,8 +42,20 @@ impl RegistrationState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SessionId(pub usize);
+
+impl Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+
 struct SessionContext {
     id: SessionId,
+    session_to_manager: SessionToManagerSender,
+
     nickname: String,
     username: String,
     realname: String,
@@ -47,6 +66,7 @@ struct SessionContext {
 
 pub struct Session {
     handle: JoinHandle<()>,
+    manager_to_session: ManagerToSessionSender,
     cancel: broadcast::Sender<()>,
 }
 
@@ -54,27 +74,27 @@ impl Session {
     pub fn start(
         stream: TcpStream,
         id: SessionId,
-        request_sender: mpsc::UnboundedSender<SessionMessage>,
-    ) -> (Self, mpsc::UnboundedSender<ManagerMessage>) {
+        session_to_manager: SessionToManagerSender
+    ) -> Self {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-        let (mut bus, tx) = SessionBus::new(request_sender);
+        let (manager_to_session_tx, mut manager_to_session_rx) = Self::manager_to_session_channel();
 
         let handle = tokio::spawn(async move {
             let mut idle_interval = interval(Duration::from_secs(10));
             let mut transport = Transport::start(stream);
-            let mut ctx = SessionContext::new(id);
+            let mut ctx = SessionContext::new(id, session_to_manager);
 
             loop {
                 let result = tokio::select! {
-                    Some(msg) = Self::recv_client_message(&mut transport) => {
-                        ctx.handle_client_msg(msg, &transport, &bus).await
+                    Some(msg) = transport.recv() => {
+                        ctx.handle_client_msg(msg, &transport).await
                     }
 
-                    Some(msg) = Self::recv_manager_message(&mut bus) => {
-                        ctx.handle_manager_msg(msg, &transport, &bus)
+                    Some(msg) = manager_to_session_rx.0.recv() => {
+                        ctx.handle_manager_msg(msg, &transport)
                     }
 
-                    _ = Self::recv_idle_timer(&mut idle_interval) => {
+                    _ = idle_interval.tick() => {
                         ctx.handle_idle_timer()
                     }
 
@@ -84,16 +104,18 @@ impl Session {
                 if result.is_err() { break }
             }
             transport.stop().await;
-            let _ = bus.send(SessionMessage::Quit(Request::new(id, ())));
+            ctx.session_to_manager.0.send(SessionToManagerMsg::Quit(Event::new(id, ())));
         });
 
-        (
-            Self {
-                handle,
-                cancel: cancel_tx,
-            },
-            tx,
-        )
+        Self {
+            handle,
+            manager_to_session: manager_to_session_tx,
+            cancel: cancel_tx,
+        }
+    }
+
+    pub fn send(&self, msg: ManagerToSessionMsg) -> Result<(), ()> {
+        self.manager_to_session.0.send(msg).map_err(|_| ())
     }
 
     pub async fn stop(&self) {
@@ -105,23 +127,16 @@ impl Session {
         }
     }
 
-    async fn recv_client_message(transport: &mut Transport) -> Option<Message> {
-        transport.recv().await
-    }
-
-    async fn recv_manager_message(bus: &mut SessionBus) -> Option<ManagerMessage> {
-        bus.recv().await
-    }
-
-    async fn recv_idle_timer(interval: &mut Interval) {
-        interval.tick().await;
+    fn manager_to_session_channel() -> (ManagerToSessionSender, ManagerToSessionReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (ManagerToSessionSender(tx), ManagerToSessionReceiver(rx))
     }
 }
 
 impl SessionContext {
-    fn new(id: SessionId) -> Self {
+    fn new(id: SessionId, session_to_manager: SessionToManagerSender) -> Self {
         Self {
-            id, nickname: String::new(), username: String::new(), realname: String::new(), registration: RegistrationState::default(), last_pong: Instant::now(), interval: time::interval(Duration::from_secs(10)) 
+            id, session_to_manager, nickname: String::new(), username: String::new(), realname: String::new(), registration: RegistrationState::default(), last_pong: Instant::now(), interval: time::interval(Duration::from_secs(10)) 
         }
     }
 
@@ -184,7 +199,6 @@ impl SessionContext {
         &mut self,
         msg: Message,
         transport: &Transport,
-        bus: &SessionBus,
     ) -> Result<(), ()> {
         debug!("session {:} received message: {:?}", self.id, msg);
         match msg.command() {
@@ -237,9 +251,8 @@ impl SessionContext {
             }
 
             Command::NICK { nickname } => {
-                let (rpc_msg, rx) = RpcMessage::new(Request::new(self.id, nickname.clone()));
-                bus.send(SessionMessage::RegisterNickname(rpc_msg))
-                    .map_err(|_| ())?;
+                let (request, rx) = Request::new(self.id, nickname.clone());
+                self.session_to_manager.0.send(SessionToManagerMsg::RegisterNickname(request)).map_err(|_| ())?;
 
                 if let Ok(Err(())) = rx.await {
                     transport
@@ -268,14 +281,13 @@ impl SessionContext {
                 if !self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
-                bus.send(SessionMessage::PrivateMessage(Request::new(
-                    self.id,
-                    (
-                        targets.to_owned(),
-                        msg.with_source(Source::default().with_name(self.nickname.clone())),
-                    ),
-                )))
-                .map_err(|_| ())?;
+                self.session_to_manager.0.send(
+                    SessionToManagerMsg::PrivateMessage(
+                        Event::new(
+                            self.id, PrivateMessageInfo{targets: targets.to_owned(), msg: msg.with_source(Source::default().with_name(self.nickname.clone()))}
+                        )
+                    )
+                ).map_err(|_| ())?;
 
                 Ok(())
             }
@@ -285,10 +297,9 @@ impl SessionContext {
                     return Ok(());
                 }
 
-                let (rpc_msg, rx) =
-                    RpcMessage::new(Request::new(self.id, (channels.clone(), keys.clone())));
-                bus.send(SessionMessage::JoinChannels(rpc_msg))
-                    .map_err(|_| ())?;
+                let (request, rx) =
+                    Request::new(self.id, JoinChannelsInfo{names: channels.clone(), passwords: keys.clone()});
+                self.session_to_manager.0.send(SessionToManagerMsg::JoinChannels(request)).map_err(|_| ())?;
                 if let Ok(joined_channels) = rx.await {
                     transport
                         .send(
@@ -312,12 +323,11 @@ impl SessionContext {
 
     fn handle_manager_msg(
         &mut self,
-        msg: ManagerMessage,
+        msg: ManagerToSessionMsg,
         transport: &Transport,
-        bus: &SessionBus,
     ) -> Result<(), ()> {
         match msg {
-            ManagerMessage::PrivateMessage(priv_message) => {
+            ManagerToSessionMsg::PrivateMessage(priv_message) => {
                 debug!("session {:} sent message: {:?}", self.id, priv_message);
                 transport.send(priv_message).map_err(|_| ())
             }

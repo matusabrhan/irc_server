@@ -1,69 +1,135 @@
 use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
+    collections::{HashMap, HashSet}, time::Duration
 };
 
+use irc_proto::message::Message;
+use log::{debug};
 use tokio::{
-    sync::{broadcast, mpsc},
-    task::JoinHandle,
-    time,
+    net::TcpStream, sync::{broadcast, mpsc, oneshot}, task::JoinHandle, time
 };
 
-use crate::ipc_bus::{ManagerBus, ManagerMessage, ServerBus, ServerMessage, SessionId, SessionMessage};
+use crate::session::{ManagerToSessionMsg, Session, SessionId};
+
+pub struct Event<T> {
+    id: SessionId,
+    content: T,
+}
+
+impl<T> Event<T> {
+    pub fn new(id: SessionId, content: T) -> Self {
+        Self { id, content }
+    }
+
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    pub fn content(&self) -> &T {
+        &self.content
+    }
+}
+
+pub struct Request<TReq, TRes> {
+    id: SessionId,
+    content: TReq,
+    reply: oneshot::Sender<TRes>,
+}
+
+impl<TReq, TRes> Request<TReq, TRes> {
+    pub fn new(id: SessionId, contents: TReq) -> (Request<TReq, TRes>, oneshot::Receiver<TRes>) {
+        let (tx, rx) = oneshot::channel::<TRes>();
+        (
+            Request {
+                id,
+                content: contents,
+                reply: tx,
+            },
+            rx,
+        )
+    }
+
+    pub fn id(&self) -> &SessionId {
+        &self.id
+    }
+
+    pub fn content(&self) -> &TReq {
+        &self.content
+    }
+
+    pub fn reply(self, msg: TRes) -> Result<(), ()> {
+        self.reply.send(msg).map_err(|_| ())
+    }
+}
+
+pub enum ServerToManagerMsg {
+    OpenSession(TcpStream),
+}
+
+struct ServerToManagerReceiver(mpsc::UnboundedReceiver<ServerToManagerMsg>);
+pub struct ServerToManagerSender(pub mpsc::UnboundedSender<ServerToManagerMsg>);
+
+pub enum SessionToManagerMsg {
+    RegisterNickname(Request<String, Result<(), ()>>),
+    PrivateMessage(Event<PrivateMessageInfo>),
+    JoinChannels(Request<JoinChannelsInfo, Vec<String>>),
+    Quit(Event<()>),
+}
+
+pub struct PrivateMessageInfo {
+    pub targets: Vec<String>,
+    pub msg: Message,
+}
+
+pub struct JoinChannelsInfo {
+    pub names: Vec<String>,
+    pub passwords: Option<Vec<String>>
+}
+
+struct SessionToManagerReceiver(mpsc::UnboundedReceiver<SessionToManagerMsg>);
+pub struct SessionToManagerSender(pub mpsc::UnboundedSender<SessionToManagerMsg>);
 
 pub struct Manager {
     handle: JoinHandle<()>,
-    _request_sender: mpsc::UnboundedSender<SessionMessage>,
+    server_to_manager: ServerToManagerSender,
     cancel: broadcast::Sender<()>,
 }
 
 struct ManagerContext {
+    sessions_to_manager: SessionToManagerSender,
+    session_ids: Vec<SessionId>,
+    sessions: HashMap<SessionId, Session>,
     nicknames: HashMap<SessionId, String>,
     channels: HashMap<String, HashSet<SessionId>>,
 }
 
 impl Manager {
-    pub fn start(server_bus: ServerBus) -> Self {
+    pub fn start() -> Self {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
-        let (mut bus, mut server_receiver) = ManagerBus::new(server_bus);
-        let _request_sender = bus.new_session_sender();
+        let (server_to_manager_tx, mut server_to_manager_rx) = Self::server_to_manager_channel();
+        let (sessions_to_manager_tx, mut sessions_to_manager_rx) = Self::sessions_to_manager_channel();
 
         let handle = tokio::spawn(async move {
-            let mut ctx = ManagerContext::new();
+            let mut ctx = ManagerContext::new(sessions_to_manager_tx);
             loop {
                 tokio::select! {
-                    Some(msg) = bus.session_recv() => {
-                        ctx.handle_session_msg(&mut bus, msg);
+                    Some(msg) = sessions_to_manager_rx.0.recv() => {
+                        ctx.handle_session_msg(msg).await;
                     }
 
-                    Some(msg) = server_receiver.recv() => {
-                        match msg {
-                            ServerMessage::RegisterSession(id, channel) => {
-                                bus.add_sender(id, channel);
-                            }
-
-                            ServerMessage::CloseSession(..) => {
-                                unreachable!();
-                            }
-
-                        };
+                    Some(msg) = server_to_manager_rx.0.recv() => {
+                         ctx.handle_server_msg(msg)
                     }
 
                     _ = cancel_rx.recv() => break,
-
                 }
             }
         });
 
         Self {
             handle,
-            _request_sender,
+            server_to_manager: server_to_manager_tx,
             cancel: cancel_tx,
         }
-    }
-
-    pub fn new_request_sender(&self) -> mpsc::UnboundedSender<SessionMessage> {
-        self._request_sender.clone()
     }
 
     pub async fn stop(&self) {
@@ -74,11 +140,28 @@ impl Manager {
             self.handle.abort();
         }
     }
+
+    pub fn get_server_to_manager_sender(&self) -> ServerToManagerSender {
+        ServerToManagerSender(self.server_to_manager.0.clone())
+    }
+
+    fn server_to_manager_channel() -> (ServerToManagerSender, ServerToManagerReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (ServerToManagerSender(tx), ServerToManagerReceiver(rx))
+    }
+
+    fn sessions_to_manager_channel() -> (SessionToManagerSender, SessionToManagerReceiver) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (SessionToManagerSender(tx), SessionToManagerReceiver(rx))
+    }
 }
 
 impl ManagerContext {
-    fn new() -> Self {
+    fn new(sessions_to_manager: SessionToManagerSender) -> Self {
         Self {
+            sessions_to_manager,
+            session_ids: (1..256).map(SessionId).collect(),
+            sessions: HashMap::new(),
             nicknames: HashMap::new(),
             channels: HashMap::new(),
         }
@@ -91,45 +174,61 @@ impl ManagerContext {
             .map(|(k, _)| *k)
     }
 
-    fn handle_session_msg(&mut self, bus: &mut ManagerBus, msg: SessionMessage) {
+    fn get_sessions_to_manager_sender(&self) -> SessionToManagerSender {
+        SessionToManagerSender(self.sessions_to_manager.0.clone())
+    }
+
+    fn handle_server_msg(&mut self, msg: ServerToManagerMsg) {
         match msg {
-            SessionMessage::RegisterNickname(rpc_msg) => {
-                match self.find_nickname_id(&rpc_msg.request.msg) {
+            ServerToManagerMsg::OpenSession(stream) => {
+                if let Some(id) = self.session_ids.pop() {
+                    let address = stream.peer_addr().unwrap();
+                    let session =
+                        Session::start(stream, id, self.get_sessions_to_manager_sender());
+                    self.sessions.insert(id, session);
+                    debug!("opened session from {:} with id {:}", address, id)
+                }
+            }
+        }
+    }
+
+    async fn handle_session_msg(&mut self, msg: SessionToManagerMsg) {
+        match msg {
+            SessionToManagerMsg::RegisterNickname(request) => {
+                match self.find_nickname_id(request.content()) {
                     Some(_) => {
-                        let _ = rpc_msg.reply.send(Result::Err(()));
+                        let _ = request.reply(Result::Err(()));
                     }
                     None => {
                         self.nicknames
-                            .insert(rpc_msg.request.id, rpc_msg.request.msg);
-                        let _ = rpc_msg.reply.send(Result::Ok(()));
+                            .insert(*request.id(), request.content().to_string());
+                        let _ = request.reply(Result::Ok(()));
                     }
                 }
             }
 
-            SessionMessage::PrivateMessage(request) => {
+            SessionToManagerMsg::PrivateMessage(event) => {
                 let source = self
                     .nicknames
-                    .get(&request.id)
+                    .get(event.id())
                     .expect("nick must be known when sending private message");
-                for ref target in request.msg.0 {
+                for target in &event.content().targets {
                     if target == source {
                         continue;
                     }
 
                     match self.find_nickname_id(target) {
                         Some(target_id) => {
-                            let _ = bus.session_send(
-                                &target_id,
-                                ManagerMessage::PrivateMessage(request.msg.1.clone()),
-                            );
+                            if let Some(session) = self.sessions.get(&target_id) {
+                                session.send(ManagerToSessionMsg::PrivateMessage(event.content().msg.clone()),);
+                            }
                         }
                         None => {
                             if let Some(channel_member_ids) = self.channels.get(target) {
                                 for member_id in channel_member_ids {
-                                    let _ = bus.session_send(
-                                        member_id,
-                                        ManagerMessage::PrivateMessage(request.msg.1.clone()),
-                                    );
+                                    if let Some(session) = self.sessions.get(member_id) {
+                                        session.send(ManagerToSessionMsg::PrivateMessage(event.content().msg.clone()),);
+                                    }
                                 }
                             }
                         }
@@ -137,26 +236,30 @@ impl ManagerContext {
                 }
             }
 
-            SessionMessage::JoinChannels(rpc_msg) => {
+            SessionToManagerMsg::JoinChannels(request) => {
                 // TODO: handle channel passwords
 
                 let mut joined_channels: Vec<String> = Vec::new();
-                for channel_name in rpc_msg.request.msg.0 {
+                for channel_name in &request.content().names {
                     joined_channels.push(channel_name.clone());
                     self.channels
-                        .entry(channel_name)
+                        .entry(channel_name.clone())
                         .or_default()
-                        .insert(rpc_msg.request.id);
+                        .insert(*request.id());
                 }
-                let _ = rpc_msg.reply.send(joined_channels);
+                let _ = request.reply.send(joined_channels);
             }
 
-            SessionMessage::Quit(request) => {
-                self.nicknames.remove(&request.id);
+            SessionToManagerMsg::Quit(request) => {
+                self.nicknames.remove(request.id());
                 for channel in self.channels.values_mut() {
-                    channel.remove(&request.id);
+                    channel.remove(request.id());
                 }
-                bus.server_send(ServerMessage::CloseSession(request.id));
+                if let Some(session) = self.sessions.remove(request.id()) {
+                    self.session_ids.push(*request.id());
+                    session.stop().await;
+                    debug!("closed session with id {:}", request.id())
+                }
             }
         }
     }
