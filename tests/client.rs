@@ -1,43 +1,32 @@
-use irc_proto::{
-    connection::Connection,
-    message::{Command, Message},
-};
+use irc_proto::message::{Command, Message, MessageBuilder};
+use irc_server::transport::Transport;
 use std::{net, time::Duration};
-use tokio::{
-    net::TcpStream,
-    sync::{broadcast, mpsc},
-};
+use tokio::{net::TcpStream, sync::broadcast};
 
 pub struct Client {
     name: String,
-    connected: bool,
-    read: mpsc::UnboundedReceiver<Message>,
-    write: mpsc::UnboundedSender<Message>,
+    transport: Option<Transport>,
     shutdown_sig: broadcast::Sender<()>,
 }
 
 impl Client {
     pub fn new(user: &str) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel::<Message>();
         Self {
             name: String::from(user),
-            connected: false,
-            read: rx,
-            write: tx,
+            transport: None,
             shutdown_sig: broadcast::channel(1).0,
         }
     }
 
     pub async fn connect(&mut self, address: net::SocketAddr, password: Option<&str>) {
-        if self.connected {
+        if self.transport.is_some() {
             return;
         }
         let stream = TcpStream::connect(address)
             .await
             .expect("client could not connect");
-        let (tx, rx) = spawn_rw_task(stream, self.shutdown_sig.subscribe());
-        self.write = tx;
-        self.read = rx;
+        self.transport = Some(Transport::start(stream.into_std().unwrap()));
+
         if let Some(password) = password {
             self.register(password).expect("client could not register");
         }
@@ -49,83 +38,43 @@ impl Client {
         }
     }
 
-    pub fn send(&self, cmd: Command) {
-        self.write
-            .send(Message::default().with_command(cmd))
-            .expect("client could not send command")
+    pub fn send(&self, cmd: Command) -> Result<(), ()> {
+        if let Some(transport) = &self.transport {
+            transport.send(MessageBuilder::with_command(cmd).build().ok_or(())?)?
+        }
+        Ok(())
     }
 
     pub async fn read(&mut self) -> Option<Message> {
-        tokio::time::timeout(Duration::from_millis(100), self.read.recv())
-            .await
-            .unwrap_or(None)
+        if let Some(transport) = self.transport.as_mut() {
+            return tokio::time::timeout(Duration::from_millis(100), transport.recv())
+                .await
+                .unwrap_or(None);
+        }
+        None
     }
 
-    pub fn disconnect(&mut self) {
+    pub async fn disconnect(&mut self) {
         self.shutdown_sig
             .send(())
             .expect("client could not disconnect");
-        self.connected = false;
+        if let Some(transport) = self.transport.as_mut() {
+            transport.stop().await;
+        }
+        self.transport = None;
     }
 
-    fn register(&self, password: &str) -> Result<(), mpsc::error::SendError<Message>> {
-        self.write
-            .send(Message::default().with_command(Command::PASS {
-                password: password.to_string(),
-            }))?;
-        self.write
-            .send(Message::default().with_command(Command::USER {
-                user: format!("username_{:}", self.name),
-                mode: "0".to_string(),
-                unused: "*".to_string(),
-                realname: format!("realname_{:}", self.name),
-            }))?;
-        self.write
-            .send(Message::default().with_command(Command::NICK {
-                nickname: self.name.clone(),
-            }))?;
+    fn register(&self, password: &str) -> Result<(), ()> {
+        self.send(Command::PASS { password })?;
+        self.send(Command::USER {
+            user: &format!("username_{:}", self.name),
+            mode: "0",
+            unused: "*",
+            realname: &format!("realname_{:}", self.name),
+        })?;
+        self.send(Command::NICK {
+            nickname: &self.name,
+        })?;
         Ok(())
     }
-}
-
-fn spawn_rw_task(
-    stream: TcpStream,
-    mut shutdown: broadcast::Receiver<()>,
-) -> (
-    mpsc::UnboundedSender<Message>,
-    mpsc::UnboundedReceiver<Message>,
-) {
-    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<Message>();
-    let (read_tx, read_rx) = mpsc::unbounded_channel::<Message>();
-
-    let mut conn = Connection::new(stream);
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                msg = conn.read() => {
-                    match msg {
-                        Ok(msg) => {
-                            if let Err(_) = read_tx.send(msg) {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                msg = write_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            if let Err(_) = conn.write(msg).await {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                _ = shutdown.recv() => break,
-            }
-        }
-        write_rx.close();
-    });
-    (write_tx, read_rx)
 }

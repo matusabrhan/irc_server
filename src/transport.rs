@@ -1,8 +1,7 @@
-use std::time::Duration;
+use std::{net::TcpStream, time::Duration};
 
 use irc_proto::{connection::Connection, message::Message};
 use tokio::{
-    net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
     time,
@@ -25,22 +24,18 @@ impl Transport {
         let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    msg = conn.read() => {
-                        match msg {
-                            Ok(msg) => {
-                                if client_tx.send(msg).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
+                    msg = Self::read_connection(&mut conn) => {
+                        if client_tx.send(msg).is_err() {
+                                break;
                         }
                     }
                     msg = client_rx.recv() => {
                         match msg {
                             Some(msg) => {
-                                if conn.write(msg).await.is_err() {
+                                if conn.write(msg).is_err() {
                                     break;
                                 }
+
                             }
                             None => break,
                         }
@@ -56,6 +51,19 @@ impl Transport {
             tx: server_tx,
             rx: server_rx,
             cancel: cancel_tx,
+        }
+    }
+
+    async fn read_connection(conn: &mut Connection) -> Message {
+        loop {
+            match conn.read() {
+                Ok(msg) => {
+                    return msg;
+                }
+                Err(_) => {
+                    tokio::task::yield_now().await;
+                }
+            }
         }
     }
 

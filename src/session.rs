@@ -1,18 +1,17 @@
-use log::debug;
-use std::{fmt::Display, time::Duration};
+use log;
+use std::{fmt::Display, net::TcpStream, time::Duration};
 
 use crate::{
-    config::CONFIG, manager::{Event, JoinChannelsInfo, PrivateMessageInfo, Request, SessionToManagerMsg, SessionToManagerSender}, transport::Transport
+    config::CONFIG,
+    manager::{Event, Request, SessionToManagerMsg, SessionToManagerSender},
+    transport::Transport,
 };
-use irc_proto::message::{Command, Message, Source};
+use irc_proto::message::{Command, Message, MessageBuilder};
 use tokio::{
-    net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
-    time::{self, Instant, interval},
+    time::{self, interval, Instant},
 };
-
-
 
 pub enum ManagerToSessionMsg {
     PrivateMessage(Message),
@@ -51,7 +50,6 @@ impl Display for SessionId {
     }
 }
 
-
 struct SessionContext {
     id: SessionId,
     session_to_manager: SessionToManagerSender,
@@ -61,7 +59,7 @@ struct SessionContext {
     realname: String,
     registration: RegistrationState,
     last_pong: Instant,
-    interval: time::Interval
+    interval: time::Interval,
 }
 
 pub struct Session {
@@ -74,13 +72,14 @@ impl Session {
     pub fn start(
         stream: TcpStream,
         id: SessionId,
-        session_to_manager: SessionToManagerSender
+        session_to_manager: SessionToManagerSender,
     ) -> Self {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (manager_to_session_tx, mut manager_to_session_rx) = Self::manager_to_session_channel();
 
         let handle = tokio::spawn(async move {
             let mut idle_interval = interval(Duration::from_secs(10));
+
             let mut transport = Transport::start(stream);
             let mut ctx = SessionContext::new(id, session_to_manager);
 
@@ -101,10 +100,14 @@ impl Session {
                     _ = cancel_rx.recv() => Err(()),
                 };
 
-                if result.is_err() { break }
+                if result.is_err() {
+                    break;
+                }
             }
             transport.stop().await;
-            ctx.session_to_manager.0.send(SessionToManagerMsg::Quit(Event::new(id, ())));
+            ctx.session_to_manager
+                .0
+                .send(SessionToManagerMsg::Quit(Event::new(id, ())));
         });
 
         Self {
@@ -136,93 +139,108 @@ impl Session {
 impl SessionContext {
     fn new(id: SessionId, session_to_manager: SessionToManagerSender) -> Self {
         Self {
-            id, session_to_manager, nickname: String::new(), username: String::new(), realname: String::new(), registration: RegistrationState::default(), last_pong: Instant::now(), interval: time::interval(Duration::from_secs(10)) 
+            id,
+            session_to_manager,
+            nickname: String::new(),
+            username: String::new(),
+            realname: String::new(),
+            registration: RegistrationState::default(),
+            last_pong: Instant::now(),
+            interval: time::interval(Duration::from_secs(10)),
         }
     }
 
     fn send_message(&self, transport: &Transport, msg: Message) -> Result<(), ()> {
-        debug!("message to {:}: {:?}", self.id, msg);
-        transport .send(msg) .map_err(|_| ())
+        log::debug!("message to {:}: {:?}", self.id, msg.contents());
+        transport.send(msg).map_err(|_| ())
     }
 
     fn send_welcome(&self, transport: &Transport) -> Result<(), ()> {
-        self.send_message(transport,
-            Message::default()
-            .with_source(Source::default().with_name(CONFIG.server.name.clone()))
-            .with_command(Command::RPL_WELCOME {
-                text: format!(
-                          "Welcome to the {} Network, {}",
-                          CONFIG.network_name.clone(),
-                          self.nickname
-                      ),
+        self.send_message(
+            transport,
+            MessageBuilder::with_command(Command::RPL_WELCOME {
+                client: &self.nickname,
+                text: &format!(
+                    "Welcome to the {} Network, {}",
+                    CONFIG.network_name.clone(),
+                    self.nickname
+                ),
             })
+            .with_source(&CONFIG.server.name, None, None)
+            .build()
+            .ok_or(())?,
         )?;
-        self.send_message(transport,
-            Message::default()
-            .with_source(Source::default().with_name(CONFIG.server.name.clone()))
-            .with_command(Command::RPL_YOURHOST {
-                //"<client> :Your host is <servername>, running version <version>"
-                text: format!(
-                          "Your host is {}, running version {}",
-                          CONFIG.server.name.clone(),
-                          CONFIG.server.version.clone(),
-                      ),
-            }),
+        self.send_message(
+            transport,
+            MessageBuilder::with_command(Command::RPL_YOURHOST {
+                client: &self.nickname,
+                text: &format!(
+                    "Your host is {}, running version {}",
+                    CONFIG.server.name.clone(),
+                    CONFIG.server.version.clone(),
+                ),
+            })
+            .with_source(&CONFIG.server.name, None, None)
+            .build()
+            .ok_or(())?,
         )?;
-        self.send_message(transport,
-            Message::default()
-            .with_source(Source::default().with_name(CONFIG.server.name.clone()))
-            .with_command(Command::RPL_CREATED {
-                // "<client> :This server was created <datetime>"
-                text: format!("This server was created {:?}", CONFIG.server.time),
-            }),
+        self.send_message(
+            transport,
+            MessageBuilder::with_command(Command::RPL_CREATED {
+                client: &self.nickname,
+                text: &format!("This server was created {:?}", CONFIG.server.time),
+            })
+            .with_source(&CONFIG.server.name, None, None)
+            .build()
+            .ok_or(())?,
         )?;
-        self.send_message(transport,
-            Message::default()
-            .with_source(Source::default().with_name(CONFIG.server.name.clone()))
-            .with_command(Command::RPL_MYINFO{
-                // TODO:
-                // "<client> <servername> <version> <available user modes> <available channel modes> [<channel modes with a parameter>]"
-                text: format!("{} {} <available user modes> <available channel modes> [<channel modes with a parameter>]",
-                          CONFIG.server.name, CONFIG.server.version),
-            }),
+        self.send_message(
+            transport,
+            MessageBuilder::with_command(Command::RPL_MYINFO {
+                client: &self.nickname,
+                servername: &CONFIG.server.name,
+                version: &CONFIG.server.version,
+                user_modes: "user_modes",
+                channel_modes: "channel_modes",
+            })
+            .with_source(&CONFIG.server.name, None, None)
+            .build()
+            .ok_or(())?,
         )?;
 
         Ok(())
     }
 
-    async fn handle_client_msg(
-        &mut self,
-        msg: Message,
-        transport: &Transport,
-    ) -> Result<(), ()> {
-        debug!("message from {:}: {:?}", self.id, msg);
-        match msg.command() {
+    async fn handle_client_msg(&mut self, msg: Message, transport: &Transport) -> Result<(), ()> {
+        log::debug!("message from {:}: {:?}", self.id, msg.contents());
+        match msg.get_command() {
             Command::PING { token } => {
                 self.last_pong = Instant::now();
-                self.send_message(transport,
-                    Message::default()
-                    .with_source(Source::default().with_name(CONFIG.server.name.clone()))
-                    .with_command(Command::PONG {
-                        server: Some(CONFIG.server.name.clone()),
-                        token: token.to_string(),
-                    }),
+                self.send_message(
+                    transport,
+                    MessageBuilder::with_command(Command::PONG {
+                        server: Some(&CONFIG.server.name),
+                        token,
+                    })
+                    .with_source(&CONFIG.server.name, None, None)
+                    .build()
+                    .ok_or(())?,
                 )
-            },
+            }
 
             Command::PASS { password } => {
                 if self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
                 if CONFIG.server.password != *password {
-                    self.send_message(transport,
-                        Message::default()
-                        .with_source(
-                            Source::default().with_name(CONFIG.server.name.clone()),
-                        )
-                        .with_command(Command::ERR_PASSWDMISMATCH {
-                            client: String::new(),
-                        }),
+                    self.send_message(
+                        transport,
+                        MessageBuilder::with_command(Command::ERR_PASSWDMISMATCH {
+                            client: "client",
+                        })
+                        .with_source(&CONFIG.server.name, None, None)
+                        .build()
+                        .ok_or(())?,
                     )?
                 }
                 self.registration.set(RegistrationState::PASS, true);
@@ -243,23 +261,26 @@ impl SessionContext {
             }
 
             Command::NICK { nickname } => {
-                let (request, rx) = Request::new(self.id, nickname.clone());
-                self.session_to_manager.0.send(SessionToManagerMsg::RegisterNickname(request)).map_err(|_| ())?;
+                let (request, rx) = Request::new(self.id, nickname.to_string());
+                self.session_to_manager
+                    .0
+                    .send(SessionToManagerMsg::RegisterNickname(request))
+                    .map_err(|_| ())?;
 
                 if let Ok(Err(())) = rx.await {
-                    self.send_message(transport,
-                        Message::default()
-                        .with_source(
-                            Source::default().with_name(CONFIG.server.name.clone()),
-                        )
-                        .with_command(Command::ERR_NICKNAMEINUSE {
-                            client: String::new(),
-                            nick: String::new(),
-                        }),
+                    self.send_message(
+                        transport,
+                        MessageBuilder::with_command(Command::ERR_NICKNAMEINUSE {
+                            client: "<client>",
+                            nick: nickname,
+                        })
+                        .with_source(&CONFIG.server.name, None, None)
+                        .build()
+                        .ok_or(())?,
                     )?;
-                    return Ok(())
+                    return Ok(());
                 }
-                self.nickname = nickname.clone();
+                self.nickname = nickname.to_string();
                 self.registration.set(RegistrationState::NICK, true);
                 if self.registration.check(RegistrationState::ALL) {
                     self.send_welcome(transport)?;
@@ -267,36 +288,44 @@ impl SessionContext {
                 Ok(())
             }
 
-            Command::PRIVMSG { targets, .. } => {
+            Command::PRIVMSG { .. } => {
                 if !self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
-                self.session_to_manager.0.send(
-                    SessionToManagerMsg::PrivateMessage(
-                        Event::new(
-                            self.id, PrivateMessageInfo{targets: targets.to_owned(), msg: msg.with_source(Source::default().with_name(self.nickname.clone()))}
-                        )
-                    )
-                ).map_err(|_| ())?;
+                self.session_to_manager
+                    .0
+                    .send(SessionToManagerMsg::PrivateMessage(Event::new(
+                        self.id,
+                        MessageBuilder::with_command(msg.get_command())
+                            .with_source(&self.nickname, None, None)
+                            .build()
+                            .ok_or(())?,
+                    )))
+                    .map_err(|_| ())?;
 
                 Ok(())
             }
 
-            Command::JOIN { channels, keys } => {
+            Command::JOIN { .. } => {
                 if !self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
 
-                let (request, rx) =
-                    Request::new(self.id, JoinChannelsInfo{names: channels.clone(), passwords: keys.clone()});
-                self.session_to_manager.0.send(SessionToManagerMsg::JoinChannels(request)).map_err(|_| ())?;
+                let (request, rx) = Request::new(self.id, msg);
+                self.session_to_manager
+                    .0
+                    .send(SessionToManagerMsg::JoinChannels(request))
+                    .map_err(|_| ())?;
                 if let Ok(joined_channels) = rx.await {
-                    self.send_message(transport,
-                        msg.with_command(Command::JOIN {
-                            channels: joined_channels,
+                    self.send_message(
+                        transport,
+                        MessageBuilder::with_command(Command::JOIN {
+                            channels: joined_channels.as_str(),
                             keys: None,
                         })
-                        .with_source(Source::default().with_name(self.nickname.clone())),
+                        .with_source(&CONFIG.server.name, None, None)
+                        .build()
+                        .ok_or(())?,
                     )?;
                 }
 
@@ -324,7 +353,7 @@ impl SessionContext {
     fn handle_idle_timer(&mut self) -> Result<(), ()> {
         let now = Instant::now();
         if self.last_pong + self.interval.period() < now {
-            return  Err(());
+            return Err(());
         }
         Ok(())
     }
