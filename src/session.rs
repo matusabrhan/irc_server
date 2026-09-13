@@ -1,5 +1,5 @@
 use log;
-use std::{fmt::Display, net::TcpStream, time::Duration};
+use std::{fmt::Display, time::Duration};
 
 use crate::{
     config::CONFIG,
@@ -8,6 +8,7 @@ use crate::{
 };
 use irc_proto::message::{Command, Message, MessageBuilder};
 use tokio::{
+    net::TcpStream,
     sync::{broadcast, mpsc},
     task::JoinHandle,
     time::{self, interval, Instant},

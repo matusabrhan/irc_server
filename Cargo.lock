@@ -319,13 +319,13 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "log",
+ "tokio",
 ]
 
 [[package]]
 name = "irc_server"
 version = "0.1.0"
 dependencies = [
- "bitflags 2.13.1",
  "chrono",
  "env_logger",
  "irc_proto",

@@ -1,12 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
-    net::TcpStream,
     time::Duration,
 };
 
 use irc_proto::message::{Command, Message};
 use log;
 use tokio::{
+    net::TcpStream,
     sync::{broadcast, mpsc, oneshot},
     task::JoinHandle,
     time,

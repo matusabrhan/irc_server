@@ -1,8 +1,12 @@
 use crate::manager::{Manager, ServerToManagerMsg};
 use log;
 use std::{net::SocketAddr, time::Duration};
-use tokio::net::TcpStream;
-use tokio::{net::TcpListener, sync::broadcast, task::JoinHandle, time::sleep};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::broadcast,
+    task::JoinHandle,
+    time::sleep,
+};
 
 pub struct Server {
     handle: JoinHandle<()>,
@@ -23,10 +27,6 @@ impl Server {
             loop {
                 tokio::select! {
                     Ok((stream, _)) = listener.accept() => {
-                        let stream = match stream.into_std() {
-                            Ok(stream) => stream,
-                            Err(_) => continue,
-                        };
                         Self::handle_new_session(&manager, stream);
                     }
 
@@ -53,7 +53,7 @@ impl Server {
         }
     }
 
-    fn handle_new_session(manager: &Manager, stream: std::net::TcpStream) {
+    fn handle_new_session(manager: &Manager, stream: TcpStream) {
         manager
             .get_server_to_manager_sender()
             .0

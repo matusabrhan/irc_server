@@ -25,7 +25,7 @@ impl Client {
         let stream = TcpStream::connect(address)
             .await
             .expect("client could not connect");
-        self.transport = Some(Transport::start(stream.into_std().unwrap()));
+        self.transport = Some(Transport::start(stream));
 
         if let Some(password) = password {
             self.register(password).expect("client could not register");

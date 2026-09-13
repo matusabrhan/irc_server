@@ -42,7 +42,6 @@ async fn test_ping() {
     let mut client = Client::new("user1");
     client.connect(address, None).await;
     client.send(Command::PING { token: "token" });
-
     let message = client.read().await.unwrap();
     assert_eq!(":server1 PONG server1 token\r\n", message.contents());
     server_stop.send(()).expect("server stopped");
