@@ -1,8 +1,12 @@
 use irc_proto::{enable_logging, message::Command};
-use irc_server::server::Server;
+use irc_server::{
+    config::{Config, Server as ServerConfig},
+    server::Server,
+};
 use rand::RngExt;
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -22,8 +26,10 @@ async fn start_server() -> (broadcast::Sender<()>, SocketAddr) {
         Ipv4Addr::new(127, 0, 0, 1),
         rng.random_range(1025..u16::MAX) as u16,
     ));
+    let mut config = Config::new("config.toml");
+    config.server.address = address;
 
-    let server = Server::start(address).await;
+    let server = Server::start(Arc::new(config)).await;
     tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
