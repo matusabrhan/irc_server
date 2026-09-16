@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::Duration,
 };
 
@@ -12,7 +13,10 @@ use tokio::{
     time,
 };
 
-use crate::session::{ManagerToSessionMsg, Session, SessionId};
+use crate::{
+    config::Config,
+    session::{ManagerToSessionMsg, Session, SessionId},
+};
 
 pub struct Event<T> {
     id: SessionId,
@@ -94,17 +98,18 @@ struct ManagerContext {
     sessions: HashMap<SessionId, Session>,
     nicknames: HashMap<SessionId, String>,
     channels: HashMap<String, HashSet<SessionId>>,
+    config: Arc<Config>,
 }
 
 impl Manager {
-    pub fn start() -> Self {
+    pub fn start(config: Arc<Config>) -> Self {
         let (cancel_tx, mut cancel_rx) = broadcast::channel(1);
         let (server_to_manager_tx, mut server_to_manager_rx) = Self::server_to_manager_channel();
         let (sessions_to_manager_tx, mut sessions_to_manager_rx) =
             Self::sessions_to_manager_channel();
 
         let handle = tokio::spawn(async move {
-            let mut ctx = ManagerContext::new(sessions_to_manager_tx);
+            let mut ctx = ManagerContext::new(config, sessions_to_manager_tx);
             loop {
                 tokio::select! {
                     Some(msg) = sessions_to_manager_rx.0.recv() => {
@@ -152,13 +157,14 @@ impl Manager {
 }
 
 impl ManagerContext {
-    fn new(sessions_to_manager: SessionToManagerSender) -> Self {
+    fn new(config: Arc<Config>, sessions_to_manager: SessionToManagerSender) -> Self {
         Self {
             sessions_to_manager,
             session_ids: (1..256).map(SessionId).collect(),
             sessions: HashMap::new(),
             nicknames: HashMap::new(),
             channels: HashMap::new(),
+            config,
         }
     }
 
@@ -178,7 +184,12 @@ impl ManagerContext {
             ServerToManagerMsg::OpenSession(stream) => {
                 if let Some(id) = self.session_ids.pop() {
                     let address = stream.peer_addr().unwrap();
-                    let session = Session::start(stream, id, self.get_sessions_to_manager_sender());
+                    let session = Session::start(
+                        self.config.clone(),
+                        stream,
+                        id,
+                        self.get_sessions_to_manager_sender(),
+                    );
                     self.sessions.insert(id, session);
                     log::debug!("opened session from {:} with id {:}", address, id)
                 }

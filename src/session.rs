@@ -1,8 +1,8 @@
 use log;
-use std::{fmt::Display, time::Duration};
+use std::{fmt::Display, sync::Arc, time::Duration};
 
 use crate::{
-    config::CONFIG,
+    config::Config,
     manager::{Event, Request, SessionToManagerMsg, SessionToManagerSender},
     transport::Transport,
 };
@@ -61,6 +61,7 @@ struct SessionContext {
     registration: RegistrationState,
     last_pong: Instant,
     interval: time::Interval,
+    config: Arc<Config>,
 }
 
 pub struct Session {
@@ -71,6 +72,7 @@ pub struct Session {
 
 impl Session {
     pub fn start(
+        config: Arc<Config>,
         stream: TcpStream,
         id: SessionId,
         session_to_manager: SessionToManagerSender,
@@ -82,7 +84,7 @@ impl Session {
             let mut idle_interval = interval(Duration::from_secs(10));
 
             let mut transport = Transport::start(stream);
-            let mut ctx = SessionContext::new(id, session_to_manager);
+            let mut ctx = SessionContext::new(config, id, session_to_manager);
 
             loop {
                 let result = tokio::select! {
@@ -138,7 +140,7 @@ impl Session {
 }
 
 impl SessionContext {
-    fn new(id: SessionId, session_to_manager: SessionToManagerSender) -> Self {
+    fn new(config: Arc<Config>, id: SessionId, session_to_manager: SessionToManagerSender) -> Self {
         Self {
             id,
             session_to_manager,
@@ -148,6 +150,7 @@ impl SessionContext {
             registration: RegistrationState::default(),
             last_pong: Instant::now(),
             interval: time::interval(Duration::from_secs(10)),
+            config,
         }
     }
 
@@ -163,11 +166,10 @@ impl SessionContext {
                 client: &self.nickname,
                 text: &format!(
                     "Welcome to the {} Network, {}",
-                    CONFIG.network_name.clone(),
-                    self.nickname
+                    self.config.network_name, self.nickname
                 ),
             })
-            .with_source(&CONFIG.server.name, None, None)
+            .with_source(&self.config.server.name, None, None)
             .build()
             .ok_or(())?,
         )?;
@@ -177,11 +179,10 @@ impl SessionContext {
                 client: &self.nickname,
                 text: &format!(
                     "Your host is {}, running version {}",
-                    CONFIG.server.name.clone(),
-                    CONFIG.server.version.clone(),
+                    self.config.server.name, self.config.server.version,
                 ),
             })
-            .with_source(&CONFIG.server.name, None, None)
+            .with_source(&self.config.server.name, None, None)
             .build()
             .ok_or(())?,
         )?;
@@ -189,9 +190,9 @@ impl SessionContext {
             transport,
             MessageBuilder::with_command(Command::RPL_CREATED {
                 client: &self.nickname,
-                text: &format!("This server was created {:?}", CONFIG.server.time),
+                text: &format!("This server was created {:?}", self.config.server.time),
             })
-            .with_source(&CONFIG.server.name, None, None)
+            .with_source(&self.config.server.name, None, None)
             .build()
             .ok_or(())?,
         )?;
@@ -199,12 +200,12 @@ impl SessionContext {
             transport,
             MessageBuilder::with_command(Command::RPL_MYINFO {
                 client: &self.nickname,
-                servername: &CONFIG.server.name,
-                version: &CONFIG.server.version,
+                servername: &self.config.server.name,
+                version: &self.config.server.version,
                 user_modes: "user_modes",
                 channel_modes: "channel_modes",
             })
-            .with_source(&CONFIG.server.name, None, None)
+            .with_source(&self.config.server.name, None, None)
             .build()
             .ok_or(())?,
         )?;
@@ -220,10 +221,10 @@ impl SessionContext {
                 self.send_message(
                     transport,
                     MessageBuilder::with_command(Command::PONG {
-                        server: Some(&CONFIG.server.name),
+                        server: Some(&self.config.server.name),
                         token,
                     })
-                    .with_source(&CONFIG.server.name, None, None)
+                    .with_source(&self.config.server.name, None, None)
                     .build()
                     .ok_or(())?,
                 )
@@ -233,13 +234,13 @@ impl SessionContext {
                 if self.registration.check(RegistrationState::ALL) {
                     return Ok(());
                 }
-                if CONFIG.server.password != *password {
+                if self.config.server.password != *password {
                     self.send_message(
                         transport,
                         MessageBuilder::with_command(Command::ERR_PASSWDMISMATCH {
                             client: "client",
                         })
-                        .with_source(&CONFIG.server.name, None, None)
+                        .with_source(&self.config.server.name, None, None)
                         .build()
                         .ok_or(())?,
                     )?
@@ -275,7 +276,7 @@ impl SessionContext {
                             client: "<client>",
                             nick: nickname,
                         })
-                        .with_source(&CONFIG.server.name, None, None)
+                        .with_source(&self.config.server.name, None, None)
                         .build()
                         .ok_or(())?,
                     )?;
@@ -324,7 +325,7 @@ impl SessionContext {
                             channels: joined_channels.as_str(),
                             keys: None,
                         })
-                        .with_source(&CONFIG.server.name, None, None)
+                        .with_source(&self.config.server.name, None, None)
                         .build()
                         .ok_or(())?,
                     )?;

@@ -1,11 +1,8 @@
 use chrono::Local;
-use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use std::fs::read_to_string;
 use std::net::SocketAddr;
 use toml;
-
-pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new("config.toml"));
 
 #[derive(Deserialize, Clone)]
 pub struct Config {
