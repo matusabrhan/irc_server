@@ -1,9 +1,6 @@
 use std::time::Duration;
 
-use irc_proto::{
-    connection::{Connection, ConnectionError},
-    message::Message,
-};
+use irc_proto::{connection::Connection, message::Message, IrcError};
 use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
@@ -31,8 +28,8 @@ impl Transport {
                     msg = conn.read() => {
                         match msg {
                             Ok(msg) => if client_tx.send(msg).is_err() { break }
-                            Err(ConnectionError::IOError) => break,
-                            Err(ConnectionError::ParsingError) => {},
+                            Err(IrcError::ConnectionError) => break,
+                            Err(IrcError::ParseError { .. }) => {},
                         }
                     }
 

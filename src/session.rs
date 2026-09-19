@@ -162,7 +162,7 @@ impl SessionContext {
     fn send_welcome(&self, transport: &Transport) -> Result<(), ()> {
         self.send_message(
             transport,
-            MessageBuilder::with_command(Command::RPL_WELCOME {
+            MessageBuilder::with_command(Command::RPLWELCOME {
                 client: &self.nickname,
                 text: &format!(
                     "Welcome to the {} Network, {}",
@@ -175,7 +175,7 @@ impl SessionContext {
         )?;
         self.send_message(
             transport,
-            MessageBuilder::with_command(Command::RPL_YOURHOST {
+            MessageBuilder::with_command(Command::RPLYOURHOST {
                 client: &self.nickname,
                 text: &format!(
                     "Your host is {}, running version {}",
@@ -188,7 +188,7 @@ impl SessionContext {
         )?;
         self.send_message(
             transport,
-            MessageBuilder::with_command(Command::RPL_CREATED {
+            MessageBuilder::with_command(Command::RPLCREATED {
                 client: &self.nickname,
                 text: &format!("This server was created {:?}", self.config.server.time),
             })
@@ -198,7 +198,7 @@ impl SessionContext {
         )?;
         self.send_message(
             transport,
-            MessageBuilder::with_command(Command::RPL_MYINFO {
+            MessageBuilder::with_command(Command::RPLMYINFO {
                 client: &self.nickname,
                 servername: &self.config.server.name,
                 version: &self.config.server.version,
@@ -237,7 +237,7 @@ impl SessionContext {
                 if self.config.server.password != *password {
                     self.send_message(
                         transport,
-                        MessageBuilder::with_command(Command::ERR_PASSWDMISMATCH {
+                        MessageBuilder::with_command(Command::ERRPASSWDMISMATCH {
                             client: "client",
                         })
                         .with_source(&self.config.server.name, None, None)
@@ -272,7 +272,7 @@ impl SessionContext {
                 if let Ok(Err(())) = rx.await {
                     self.send_message(
                         transport,
-                        MessageBuilder::with_command(Command::ERR_NICKNAMEINUSE {
+                        MessageBuilder::with_command(Command::ERRNICKNAMEINUSE {
                             client: "<client>",
                             nick: nickname,
                         })
