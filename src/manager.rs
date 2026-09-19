@@ -239,6 +239,9 @@ impl ManagerContext {
                         None => {
                             if let Some(channel_member_ids) = self.channels.get(target) {
                                 for member_id in channel_member_ids {
+                                    if event.id.eq(member_id) {
+                                        continue;
+                                    }
                                     if let Some(session) = self.sessions.get(member_id) {
                                         session.send(ManagerToSessionMsg::PrivateMessage(
                                             event.content().clone(),
